@@ -14,14 +14,22 @@ from ..core.pipeline import run_analysis
 @click.option("--force", is_flag=True, help="Force full re-index even if unchanged.")
 def analyze_cmd(path: str, force: bool) -> None:
     """Analyze a Java repository and build the knowledge graph."""
+    import shutil
+
     repo_path = Path(path).resolve()
-    db_dir = repo_path / ".pygitnexus"
-    db_path = db_dir / "kuzu"
-    # Ensure parent directory exists, but db_path should NOT exist for KuzuDB
-    db_dir.mkdir(parents=True, exist_ok=True)
+    db_path = repo_path / ".pygitnexus" / "kuzu"
+
+    # Clean up any leftover .pygitnexus (file or directory)
     if db_path.exists():
-        import shutil
-        shutil.rmtree(db_path)
+        if db_path.is_file():
+            db_path.unlink()
+        else:
+            shutil.rmtree(db_path)
+    # Also clean the parent .pygitnexus dir if it's a leftover file
+    db_dir = db_path.parent
+    if db_dir.is_file():
+        db_dir.unlink()
+    db_dir.mkdir(parents=True, exist_ok=True)
 
     def progress(pct: int, msg: str) -> None:
         click.echo(f"  [{pct:3d}%] {msg}")

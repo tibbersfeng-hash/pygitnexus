@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import time
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from ..core.models import ParsedFile
@@ -42,7 +42,7 @@ def run_analysis(
     java_files = scan(repo_path)
     _progress(10, f"Found {len(java_files)} Java files")
 
-    # Step 2: Parse files concurrently (ProcessPoolExecutor to avoid GIL)
+    # Step 2: Parse files concurrently (ThreadPoolExecutor — tree-sitter releases GIL)
     _progress(15, "Parsing Java files (concurrent)...")
     t0 = time.monotonic()
     parsed_files = _parse_concurrent(java_files, _progress, len(java_files))
@@ -93,7 +93,7 @@ def _parse_concurrent(
     done = 0
 
     max_workers = min(8, os.cpu_count() or 8)
-    with ProcessPoolExecutor(max_workers=max_workers) as pool:
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
             pool.submit(parse, jf.relative, jf.content): jf
             for jf in java_files
@@ -122,7 +122,7 @@ def _resolve_calls_parallel(
     parsed_files: list[ParsedFile],
     class_map: dict[str, str],
 ) -> list[tuple[str, str, str, str, float]]:
-    """Resolve call targets in parallel using ProcessPoolExecutor."""
+    """Resolve call targets in parallel using ThreadPoolExecutor."""
     from ..core.resolver import resolve_calls_chunk_with_indices
 
     max_workers = min(4, os.cpu_count() or 4)
@@ -133,7 +133,7 @@ def _resolve_calls_parallel(
     import threading
     lock = threading.Lock()
 
-    with ProcessPoolExecutor(max_workers=max_workers) as pool:
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
             pool.submit(resolve_calls_chunk_with_indices, chunk, parsed_files, class_map): i
             for i, chunk in enumerate(chunks)
