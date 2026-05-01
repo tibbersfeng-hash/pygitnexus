@@ -11,6 +11,8 @@ from .clean import clean_cmd
 from .query import query_cmd
 from .context import context_cmd
 from .cypher import cypher_cmd
+from .mcp import mcp_cmd
+from .setup import setup_cmd
 
 
 @click.group()
@@ -27,6 +29,8 @@ cli.add_command(clean_cmd)
 cli.add_command(query_cmd)
 cli.add_command(context_cmd)
 cli.add_command(cypher_cmd)
+cli.add_command(mcp_cmd)
+cli.add_command(setup_cmd)
 
 
 if __name__ == "__main__":

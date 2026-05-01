@@ -23,6 +23,9 @@ hiddenimports = [
     "tree_sitter",
     "tree_sitter_java",
     "kuzu",
+    "mcp",
+    "mcp.server",
+    "mcp.server.fastmcp",
     # CLI commands
     "pygitnexus.cli.main",
     "pygitnexus.cli.analyze",
@@ -32,6 +35,8 @@ hiddenimports = [
     "pygitnexus.cli.query",
     "pygitnexus.cli.context",
     "pygitnexus.cli.cypher",
+    "pygitnexus.cli.mcp",
+    "pygitnexus.cli.setup",
     "pygitnexus.cli._common",
     # Core
     "pygitnexus.core.pipeline",
@@ -46,6 +51,8 @@ hiddenimports = [
     "pygitnexus.search.query",
     # Storage
     "pygitnexus.storage.repo_manager",
+    # MCP
+    "pygitnexus.mcp.server",
 ]
 
 # Data files: tree-sitter-java grammars + kuzu native libs
