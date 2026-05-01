@@ -64,11 +64,14 @@ jobs:
           path: release-artifacts/
           if-no-files-found: error
 
-      - name: Upload to release
-        if: github.event_name == 'release'
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: release-artifacts/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
 
   checksums:
     name: Generate checksums
