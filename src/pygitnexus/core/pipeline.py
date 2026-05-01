@@ -648,18 +648,28 @@ class BatchWriter:
 
     def __init__(self, store: GraphStore) -> None:
         self._store = store
+        self._dots = 0
 
     def __enter__(self) -> "BatchWriter":
         return self
 
     def __exit__(self, *args) -> None:
-        pass
+        # Print newline if any dots were printed
+        if self._dots > 0:
+            print()
+
+    def _dot(self) -> None:
+        """Print a progress dot every 2 batches to show we're still working."""
+        self._dots += 1
+        if self._dots % 2 == 0:
+            print(".", end="", flush=True)
 
     def insert_nodes(self, table: str, nodes: list[dict]) -> None:
         if not nodes:
             return
         for batch in _chunked(nodes, self.BATCH_SIZE):
             self._store.bulk_unwind_insert(table, batch)
+            self._dot()
 
     def insert_relations(
         self,
@@ -676,6 +686,7 @@ class BatchWriter:
             self._store.bulk_unwind_relation(
                 from_table, to_table, batch, rel_type, confidence, reason,
             )
+            self._dot()
 
     def insert_relations_with_confidence(
         self,
@@ -692,6 +703,7 @@ class BatchWriter:
             self._store.bulk_unwind_relation_with_confidence(
                 from_table, to_table, batch, rel_type, reason,
             )
+            self._dot()
 
     def insert_file_relations(
         self,
@@ -706,6 +718,7 @@ class BatchWriter:
             self._store.bulk_unwind_relation(
                 "File", to_table, batch, rel_type, 1.0, f"file defines {to_table.lower()}",
             )
+            self._dot()
 
     def insert_typed_relations(
         self,
@@ -728,6 +741,7 @@ class BatchWriter:
             self._store.bulk_unwind_relation(
                 from_table, to_table, batch, rel_type, confidence, reason,
             )
+            self._dot()
 
     def insert_nodes_with_defines(
         self,
@@ -735,11 +749,21 @@ class BatchWriter:
         nodes: list[dict],
         rel_type: str,
     ) -> None:
-        """Insert nodes that also have a DEFINES edge from their File."""
+        """Insert nodes that also have a DEFINES edge from their File.
+
+        Uses CSV COPY for large batches (much faster than UNWIND+MATCH).
+        Falls back to UNWIND for small batches.
+        """
         if not nodes:
             return
-        for batch in _chunked(nodes, self.BATCH_SIZE):
-            self._store.bulk_unwind_insert_with_defines(table, batch, rel_type)
+        # For small batches, UNWIND is fine. For large, CSV COPY is much faster.
+        if len(nodes) <= 500:
+            for batch in _chunked(nodes, self.BATCH_SIZE):
+                self._store.bulk_unwind_insert_with_defines(table, batch, rel_type)
+                self._dot()
+        else:
+            # CSV COPY: insert all at once, no MATCH overhead
+            self._store.bulk_copy_nodes_with_defines(table, nodes, rel_type)
 
 
 def _chunked(lst: list, size: int) -> list:

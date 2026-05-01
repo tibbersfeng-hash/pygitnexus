@@ -79,16 +79,85 @@ class GraphStore:
         cypher = f"UNWIND $rows AS row CREATE (n:{table} {{{props_str}}})"
         self._execute(cypher, {"rows": rows})
 
+    def bulk_copy_nodes(
+        self,
+        table: str,
+        rows: list[dict],
+    ) -> None:
+        """Insert multiple nodes using COPY FROM CSV for maximum throughput."""
+        if not rows:
+            return
+        csv_path = os.path.join(tempfile.gettempdir(), f"kuzu_nodes_{os.getpid()}.csv")
+        try:
+            headers = list(rows[0].keys())
+            with open(csv_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(headers)
+                for row in rows:
+                    writer.writerow([row.get(h, "") for h in headers])
+            self._execute(
+                f"COPY {table} FROM '{csv_path}' (header=true)"
+            )
+        finally:
+            os.remove(csv_path)
+
+    def bulk_copy_nodes_with_defines(
+        self,
+        table: str,
+        rows: list[dict],
+        rel_type: str,
+        from_table: str = "File",
+    ) -> None:
+        """Insert nodes and their DEFINES edges using two CSV COPY passes.
+
+        Much faster than UNWIND+MATCH for large batches because:
+        1. COPY FROM is optimized for bulk loads
+        2. Relation CSV COPY avoids per-row MATCH lookups
+        """
+        if not rows:
+            return
+
+        # Pass 1: Insert nodes (all props except from_id)
+        node_headers = [k for k in rows[0].keys() if k != "from_id"]
+        node_csv = os.path.join(tempfile.gettempdir(), f"kuzu_nodes_{os.getpid()}.csv")
+        try:
+            with open(node_csv, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(node_headers)
+                for row in rows:
+                    writer.writerow([row.get(h, "") for h in node_headers])
+            self._execute(f"COPY {table} FROM '{node_csv}' (header=true, parallel=false)")
+        finally:
+            os.remove(node_csv)
+
+        # Pass 2: Insert relations via CSV COPY
+        rel_csv = os.path.join(tempfile.gettempdir(), f"kuzu_defines_{os.getpid()}.csv")
+        try:
+            with open(rel_csv, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["from_id", "to_id", "type", "confidence", "reason"])
+                reason = f"file defines {table.lower()}"
+                for row in rows:
+                    writer.writerow([row["from_id"], row["id"], rel_type, "1.0", reason])
+            self._execute(
+                f"COPY CodeRelation FROM '{rel_csv}' "
+                f"(header=true, from='{from_table}', to='{table}')"
+            )
+        finally:
+            os.remove(rel_csv)
+
     def bulk_unwind_insert_with_defines(
         self,
         table: str,
         rows: list[dict],
         rel_type: str,
     ) -> None:
-        """Insert nodes and their DEFINES edge from File in one UNWIND."""
+        """Insert nodes and their DEFINES edge from File in one UNWIND.
+
+        Fast for small batches. For large batches, use bulk_copy_nodes_with_defines.
+        """
         if not rows:
             return
-        # Extract the from_id for relation, then remove it from node props
         node_keys = [k for k in rows[0].keys() if k != "from_id"]
         node_props = ", ".join(f"{k}: row.{k}" for k in node_keys)
         cypher = (
