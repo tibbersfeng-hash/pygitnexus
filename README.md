@@ -32,7 +32,6 @@ Java 代码库知识图谱构建工具 —— [GitNexus](https://github.com/abhi
 |------|------|--------|
 | Linux | x86_64 | `pygitnexus-vX.X.X-linux-x86_64` |
 | Linux | ARM64 | `pygitnexus-vX.X.X-linux-aarch64` |
-| macOS | Intel | `pygitnexus-vX.X.X-macos-x86_64` |
 | macOS | Apple Silicon | `pygitnexus-vX.X.X-macos-arm64` |
 | Windows | x86_64 | `pygitnexus-vX.X.X-windows-x86_64.exe` |
 

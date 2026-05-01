@@ -24,9 +24,6 @@ jobs:
             arch: aarch64
             runner: ubuntu-22.04-arm
           - os: macos
-            arch: x86_64
-            runner: macos-13
-          - os: macos
             arch: arm64
             runner: macos-14
           - os: windows
