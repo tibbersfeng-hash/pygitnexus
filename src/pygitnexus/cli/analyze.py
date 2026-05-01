@@ -31,8 +31,13 @@ def analyze_cmd(path: str, force: bool) -> None:
         db_dir.unlink()
     db_dir.mkdir(parents=True, exist_ok=True)
 
+    import time as _time
+
+    _t0 = _time.monotonic()
+
     def progress(pct: int, msg: str) -> None:
-        click.echo(f"  [{pct:3d}%] {msg}")
+        elapsed = _time.monotonic() - _t0
+        click.echo(f"  [{elapsed:6.1f}s] [{pct:3d}%] {msg}")
 
     click.echo(f"Analyzing {repo_path}...")
     stats = run_analysis(repo_path, db_path, progress_callback=progress)
