@@ -642,34 +642,43 @@ def _write_to_graph_batched(
 
 
 class BatchWriter:
-    """Context manager for batched graph writes using UNWIND."""
+    """Context manager for batched graph writes with periodic heartbeat."""
 
     BATCH_SIZE = 500
+    HEARTBEAT_INTERVAL = 30  # seconds
 
     def __init__(self, store: GraphStore) -> None:
         self._store = store
-        self._dots = 0
+        self._done = 0
+        self._t0 = time.monotonic()
+        self._last_heartbeat = 0.0
 
     def __enter__(self) -> "BatchWriter":
         return self
 
     def __exit__(self, *args) -> None:
-        # Print newline if any dots were printed
-        if self._dots > 0:
-            print()
+        # Print final summary
+        elapsed = time.monotonic() - self._t0
+        print(f"  [graph] {self._done} batches in {elapsed:.1f}s")
 
-    def _dot(self) -> None:
-        """Print a progress dot every 2 batches to show we're still working."""
-        self._dots += 1
-        if self._dots % 2 == 0:
-            print(".", end="", flush=True)
+    def _heartbeat(self) -> None:
+        """Print heartbeat if 30+ seconds have passed since last one."""
+        elapsed = time.monotonic() - self._t0
+        if elapsed - self._last_heartbeat >= self.HEARTBEAT_INTERVAL:
+            print(f"  [graph] still writing... {self._done} batches done ({elapsed:.0f}s)")
+            self._last_heartbeat = elapsed
+
+    def _advance(self) -> None:
+        """Mark one batch as completed."""
+        self._done += 1
+        self._heartbeat()
 
     def insert_nodes(self, table: str, nodes: list[dict]) -> None:
         if not nodes:
             return
         for batch in _chunked(nodes, self.BATCH_SIZE):
             self._store.bulk_unwind_insert(table, batch)
-            self._dot()
+            self._advance()
 
     def insert_relations(
         self,
@@ -686,7 +695,7 @@ class BatchWriter:
             self._store.bulk_unwind_relation(
                 from_table, to_table, batch, rel_type, confidence, reason,
             )
-            self._dot()
+            self._advance()
 
     def insert_relations_with_confidence(
         self,
@@ -703,7 +712,7 @@ class BatchWriter:
             self._store.bulk_unwind_relation_with_confidence(
                 from_table, to_table, batch, rel_type, reason,
             )
-            self._dot()
+            self._advance()
 
     def insert_file_relations(
         self,
@@ -718,7 +727,7 @@ class BatchWriter:
             self._store.bulk_unwind_relation(
                 "File", to_table, batch, rel_type, 1.0, f"file defines {to_table.lower()}",
             )
-            self._dot()
+            self._advance()
 
     def insert_typed_relations(
         self,
@@ -741,7 +750,7 @@ class BatchWriter:
             self._store.bulk_unwind_relation(
                 from_table, to_table, batch, rel_type, confidence, reason,
             )
-            self._dot()
+            self._advance()
 
     def insert_nodes_with_defines(
         self,
@@ -760,7 +769,7 @@ class BatchWriter:
         if len(nodes) <= 500:
             for batch in _chunked(nodes, self.BATCH_SIZE):
                 self._store.bulk_unwind_insert_with_defines(table, batch, rel_type)
-                self._dot()
+                self._advance()
         else:
             # CSV COPY: insert all at once, no MATCH overhead
             self._store.bulk_copy_nodes_with_defines(table, nodes, rel_type)
