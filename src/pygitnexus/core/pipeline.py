@@ -35,7 +35,15 @@ def run_analysis(
 
     def _progress(pct: int, msg: str) -> None:
         if progress_callback:
-            progress_callback(pct, msg)
+            # Round to 5% increments to reduce output frequency
+            pct_rounded = round(pct / 5) * 5
+            if pct_rounded != _progress._last_pct or _progress._last_msg != msg:
+                progress_callback(pct_rounded, msg)
+                _progress._last_pct = pct_rounded
+                _progress._last_msg = msg
+
+    _progress._last_pct = -1
+    _progress._last_msg = ""
 
     # Step 1: Scan
     _progress(5, "Scanning for Java files...")
@@ -91,6 +99,7 @@ def _parse_concurrent(
     import threading
     lock = threading.Lock()
     done = 0
+    last_reported = 0
 
     max_workers = min(8, os.cpu_count() or 8)
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -110,8 +119,11 @@ def _parse_concurrent(
                     f"Skipping {jf.relative}: {e}",
                 )
             done += 1
+            # Only report every 10% progress to reduce output noise
             pct = 15 + int(40 * done / max(total, 1))
-            progress_callback(pct, f"Parsed {done}/{total} files")
+            if pct - last_reported >= 10:
+                progress_callback(pct, f"Parsed {done}/{total} files")
+                last_reported = pct
 
     # Sort by file_path for deterministic output
     parsed.sort(key=lambda pf: pf.file_path)
@@ -372,6 +384,11 @@ def _write_to_graph_batched(
         for node in interface_nodes:
             class_id_lookup[node["name"]] = node["id"]
 
+        # Build simple name → class_id index for fast annotation/constructor lookups
+        class_simple_lookup: dict[str, str] = {}
+        for fqn, nid in class_id_lookup.items():
+            class_simple_lookup[fqn.split(".")[-1]] = nid
+
         # EXTENDS (second pass after lookup is available)
         extends_by_pair: dict[tuple[str, str], list[dict]] = {}
         for pf in parsed_files:
@@ -447,15 +464,9 @@ def _write_to_graph_batched(
                     "from_id": file_id,
                 })
                 # HAS_CONSTRUCTOR relation
-                cls_fqn = None
-                for fqn in class_id_lookup:
-                    if fqn.endswith(f".{ctor.class_name}") or fqn == ctor.class_name:
-                        cls_fqn = fqn
-                        break
-                if cls_fqn:
-                    cls_node_id = class_id_lookup[cls_fqn]
-                    if cls_node_id.startswith("Class_"):
-                        has_constructors.append({"from_id": cls_node_id, "to_id": cid})
+                cls_node_id = class_simple_lookup.get(ctor.class_name)
+                if cls_node_id and cls_node_id.startswith("Class_"):
+                    has_constructors.append({"from_id": cls_node_id, "to_id": cid})
 
         bw.insert_nodes_with_defines("Constructor", ctor_defines, "DEFINES")
         if has_constructors:
@@ -512,11 +523,7 @@ def _write_to_graph_batched(
                 aid = _make_annotation_id(ann.name, ann.target_name, ann.file_path, ann.line, ann_counter)
                 ann_counter += 1
                 if ann.target_type == "class":
-                    cls_id = None
-                    for fqn, nid in class_id_lookup.items():
-                        if fqn.endswith(f".{ann.target_name}") or fqn == ann.target_name:
-                            cls_id = nid
-                            break
+                    cls_id = class_simple_lookup.get(ann.target_name)
                     if cls_id:
                         has_annotations_cls.append({"from_id": cls_id, "to_id": aid})
                 elif ann.target_type == "method":

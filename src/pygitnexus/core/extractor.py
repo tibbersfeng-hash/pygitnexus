@@ -246,6 +246,10 @@ def parse(file_path: str, content: bytes) -> ParsedFile:
     result = ParsedFile(file_path=file_path)
     package = _extract_package(content, lang, tree.root_node)
 
+    # Pre-compute class and method byte ranges for fast lookups
+    class_byte_map = _build_class_byte_map(tree.root_node, content)
+    method_byte_map = _build_method_byte_map(tree.root_node, content)
+
     # --- Classes ---
     class_q = _get_query("class", """
         (class_declaration
@@ -342,7 +346,7 @@ def parse(file_path: str, content: bytes) -> ParsedFile:
                 break
 
         modifiers_text = _extract_modifiers(method_node, content)
-        owner = _find_enclosing_class(method_node, content, lang)
+        owner = _find_enclosing_class_fast(method_node, content, class_byte_map)
 
         result.methods.append(MethodDef(
             name=method_name,
@@ -379,7 +383,7 @@ def parse(file_path: str, content: bytes) -> ParsedFile:
                 params = _extract_parameters(child, content)
                 break
 
-        owner = _find_enclosing_class(ctor_node, content, lang)
+        owner = _find_enclosing_class_fast(ctor_node, content, class_byte_map)
         ctor_modifiers = _extract_modifiers(ctor_node, content)
 
         result.constructors.append(ConstructorDef(
@@ -412,7 +416,7 @@ def parse(file_path: str, content: bytes) -> ParsedFile:
         field_node = cd["field"][0]
         field_type = _strip_generics(_node_text(type_nodes[0], content))
         field_name = _node_text(name_nodes[0], content)
-        owner = _find_enclosing_class(field_node, content, lang)
+        owner = _find_enclosing_class_fast(field_node, content, class_byte_map)
 
         field_modifiers = _extract_modifiers(field_node, content)
         is_static = "static" in field_modifiers
@@ -451,17 +455,17 @@ def parse(file_path: str, content: bytes) -> ParsedFile:
     # Build type map per-method for accurate receiver type resolution.
     _extract_calls_per_method(
         tree.root_node, content, lang, file_path, result,
-        result.imports,
+        result.imports, class_byte_map, method_byte_map,
     )
 
     # --- Local variables ---
-    result.variables = _extract_variables(tree.root_node, content, lang, file_path)
+    result.variables = _extract_variables(tree.root_node, content, lang, file_path, class_byte_map, method_byte_map)
 
     # --- Field accesses ---
     # Build field name set for this file
     local_fields = {f.name for f in result.fields}
     result.field_accesses = _extract_field_accesses(
-        tree.root_node, content, lang, file_path, local_fields,
+        tree.root_node, content, lang, file_path, local_fields, class_byte_map, method_byte_map,
     )
 
     # --- Annotations ---
@@ -488,6 +492,8 @@ def _extract_calls_per_method(
     file_path: str,
     result: ParsedFile,
     imports: list[ImportDecl],
+    class_byte_map: list[tuple[int, int, str]],
+    method_byte_map: list[tuple[int, int, str]],
 ) -> None:
     """Extract method calls using per-method type maps.
 
@@ -530,7 +536,7 @@ def _extract_calls_per_method(
         body_node = body_nodes[0]
 
         # Find enclosing class for this method
-        enclosing_class = _find_enclosing_class(name_nodes[0], source, lang)
+        enclosing_class = _find_enclosing_class_fast(name_nodes[0], source, class_byte_map)
         fq_method_name = f"{enclosing_class}.{method_name}" if enclosing_class else method_name
 
         # Build per-method type map: fields + params + local vars
@@ -862,14 +868,11 @@ def _strategy2_body_lookup(
         ) @s2call
     """)
 
-    root = lambda_node
-    while root.parent:
-        root = root.parent
-
+    # Query only within the method body, not the entire file AST
     receiver_calls: dict[str, set[str]] = {}
 
     cursor = ts.QueryCursor(call_q)
-    for _, caps in cursor.matches(root):
+    for _, caps in cursor.matches(body_node):
         cd = _captures_to_dict(call_q, caps)
         call_nodes = cd.get("s2call", [])
         name_nodes = cd.get("s2call_name", [])
@@ -1181,20 +1184,13 @@ def _infer_lambda_param_types(
     """
     method_to_classes = _build_method_to_classes(methods)
 
-    root = body_node
-    while root.parent:
-        root = root.parent
-
     lambda_q = _get_query("lambda_expr", "(lambda_expression) @lambda")
     cursor = ts.QueryCursor(lambda_q)
 
-    for _, caps in cursor.matches(root):
+    for _, caps in cursor.matches(body_node):
         cd = _captures_to_dict(lambda_q, caps)
         lambda_nodes = cd.get("lambda", [])
         for lambda_node in lambda_nodes:
-            if lambda_node.start_byte < body_node.start_byte or lambda_node.end_byte > body_node.end_byte:
-                continue
-
             has_typed_params = False
             for child in lambda_node.children:
                 if child.type == "formal_parameters":
@@ -1445,10 +1441,77 @@ _enclosing_class_q = _get_query("enclosing_class", """
 _enclosing_method_q = _get_query("enclosing_method", "(method_declaration name: (identifier) @name) @method")
 
 
+def _build_class_byte_map(root: ts.Node, source: bytes) -> list[tuple[int, int, str]]:
+    """Pre-compute all class/interface byte ranges for a file.
+
+    Returns sorted list of (start_byte, end_byte, qualified_name).
+    """
+    cursor = ts.QueryCursor(_enclosing_class_q)
+    classes: list[tuple[int, int, str]] = []
+    for _, captures in cursor.matches(root):
+        cd = _captures_to_dict(_enclosing_class_q, captures)
+        cls_nodes = cd.get("cls", [])
+        name_nodes = cd.get("name", [])
+        if cls_nodes and name_nodes:
+            cls_node = cls_nodes[0]
+            name = _node_text(name_nodes[0], source)
+            classes.append((cls_node.start_byte, cls_node.end_byte, name))
+    return classes
+
+
+def _find_enclosing_class_fast(
+    node: ts.Node,
+    source: bytes,
+    class_byte_map: list[tuple[int, int, str]],
+) -> str | None:
+    """Find enclosing class using pre-computed byte ranges. O(n) where n = #classes."""
+    enclosers: list[tuple[int, int, str]] = []
+    for start, end, name in class_byte_map:
+        if node.start_byte >= start and node.end_byte <= end:
+            enclosers.append((start, end - start, name))
+    if not enclosers:
+        return None
+    enclosers.sort(key=lambda x: x[0])
+    return ".".join(name for _, _, name in enclosers)
+
+
+def _build_method_byte_map(root: ts.Node, source: bytes) -> list[tuple[int, int, str]]:
+    """Pre-compute all method byte ranges for a file."""
+    cursor = ts.QueryCursor(_enclosing_method_q)
+    methods: list[tuple[int, int, str]] = []
+    for _, captures in cursor.matches(root):
+        cd = _captures_to_dict(_enclosing_method_q, captures)
+        method_nodes = cd.get("method", [])
+        name_nodes = cd.get("name", [])
+        if method_nodes and name_nodes:
+            name = _node_text(name_nodes[0], source)
+            methods.append((method_nodes[0].start_byte, method_nodes[0].end_byte, name))
+    return methods
+
+
+def _find_enclosing_method_fast(
+    node: ts.Node,
+    source: bytes,
+    method_byte_map: list[tuple[int, int, str]],
+    class_byte_map: list[tuple[int, int, str]],
+) -> str | None:
+    """Find enclosing method using pre-computed byte ranges."""
+    best: tuple[int, str] | None = None
+    for start, end, name in method_byte_map:
+        if node.start_byte >= start and node.end_byte <= end:
+            span = end - start
+            if best is None or span < best[0]:
+                owner = _find_enclosing_class_fast(node, source, class_byte_map)
+                best = (span, f"{owner}.{name}" if owner else name)
+    return best[1] if best else None
+
+
 def _find_enclosing_class(node: ts.Node, source: bytes, lang: ts.Language) -> str | None:
     """Find the class or interface that contains the given node by byte range comparison.
 
     For nested classes, returns the qualified name like "Outer.Inner".
+
+    Deprecated: use _find_enclosing_class_fast with a pre-built class_byte_map.
     """
     cursor = ts.QueryCursor(_enclosing_class_q)
     root = node
@@ -1585,7 +1648,14 @@ def _build_type_map(root: ts.Node, source: bytes, lang: ts.Language) -> dict[str
     return type_map
 
 
-def _extract_variables(root: ts.Node, source: bytes, lang: ts.Language, file_path: str) -> list[VariableDef]:
+def _extract_variables(
+    root: ts.Node,
+    source: bytes,
+    lang: ts.Language,
+    file_path: str,
+    class_byte_map: list[tuple[int, int, str]],
+    method_byte_map: list[tuple[int, int, str]],
+) -> list[VariableDef]:
     """Extract local variable declarations from method bodies."""
     results: list[VariableDef] = []
 
@@ -1609,8 +1679,8 @@ def _extract_variables(root: ts.Node, source: bytes, lang: ts.Language, file_pat
         var_name = _node_text(name_nodes[0], source)
         line = name_nodes[0].start_point.row + 1
 
-        enclosing_method = _find_enclosing_method(name_nodes[0], source, lang)
-        enclosing_class = _find_enclosing_class(name_nodes[0], source, lang)
+        enclosing_method = _find_enclosing_method_fast(name_nodes[0], source, method_byte_map, class_byte_map)
+        enclosing_class = _find_enclosing_class_fast(name_nodes[0], source, class_byte_map)
 
         is_final = False
         if decl_nodes:
@@ -1769,6 +1839,8 @@ def _extract_field_accesses(
     lang: ts.Language,
     file_path: str,
     local_fields: set[str],
+    class_byte_map: list[tuple[int, int, str]],
+    method_byte_map: list[tuple[int, int, str]],
 ) -> list[FieldAccess]:
     """Extract field accesses (read/write) from method bodies.
 
@@ -1840,8 +1912,8 @@ def _extract_field_accesses(
             continue
         seen.add(key)
 
-        enclosing_method = _find_enclosing_method(field_nodes[0], source, lang)
-        enclosing_class = _find_enclosing_class(field_nodes[0], source, lang)
+        enclosing_method = _find_enclosing_method_fast(field_nodes[0], source, method_byte_map, class_byte_map)
+        enclosing_class = _find_enclosing_class_fast(field_nodes[0], source, class_byte_map)
 
         if enclosing_method:
             results.append(FieldAccess(
@@ -1881,8 +1953,8 @@ def _extract_field_accesses(
             continue
         seen.add(key)
 
-        enclosing_method = _find_enclosing_method(inner_nodes[0], source, lang)
-        enclosing_class = _find_enclosing_class(inner_nodes[0], source, lang)
+        enclosing_method = _find_enclosing_method_fast(inner_nodes[0], source, method_byte_map, class_byte_map)
+        enclosing_class = _find_enclosing_class_fast(inner_nodes[0], source, class_byte_map)
 
         if enclosing_method:
             results.append(FieldAccess(
@@ -1940,8 +2012,8 @@ def _extract_field_accesses(
             continue
         seen.add(key)
 
-        enclosing_method = _find_enclosing_method(id_node, source, lang)
-        enclosing_class = _find_enclosing_class(id_node, source, lang)
+        enclosing_method = _find_enclosing_method_fast(id_node, source, method_byte_map, class_byte_map)
+        enclosing_class = _find_enclosing_class_fast(id_node, source, class_byte_map)
 
         if enclosing_method:
             results.append(FieldAccess(
