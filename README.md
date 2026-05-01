@@ -26,7 +26,7 @@ Java 代码库知识图谱构建工具 —— [GitNexus](https://github.com/abhi
 
 ### 方式一：下载预编译二进制文件（推荐）
 
-从 [Releases](https://github.com/YOUR_USERNAME/pygitnexus/releases) 下载对应平台的单文件可执行程序，无需安装 Python。
+从 [Releases](https://github.com/tibbersfeng-hash/pygitnexus/releases) 下载对应平台的单文件可执行程序，无需安装 Python。
 
 | 平台 | 架构 | 文件名 |
 |------|------|--------|
@@ -61,6 +61,7 @@ uv sync
 | tree-sitter-java | 0.23+ | Java 语法文件 |
 | kuzu | 0.11+ | 嵌入式图数据库 |
 | click | 8.1+ | CLI 框架 |
+| mcp | 1.26+ | Model Context Protocol SDK |
 
 ## 快速开始
 
@@ -101,6 +102,8 @@ uv run pygitnexus clean
 | `list` | 列出已索引仓库 | |
 | `status` | 当前目录索引状态 | |
 | `clean` | 删除当前目录索引 | `clean --all --force` 删除所有 |
+| `mcp` | 启动 MCP Server (stdio) | 供 AI 编辑器调用 |
+| `setup` | 一键配置 AI 编辑器的 MCP | 自动检测 Cursor/Claude Code/OpenCode/Codex |
 
 ## 输出示例
 
@@ -149,6 +152,70 @@ Callees (3):
   -> UserService.validate (confidence: 0.50)
   -> UserService.getName (confidence: 0.50)
 ```
+
+## MCP Server
+
+PyGitNexus 内置 MCP (Model Context Protocol) Server，让 AI 编辑器（Cursor、Claude Code、OpenCode、Codex）直接访问知识图谱，无需额外安装。
+
+### 快速启用
+
+```bash
+# 一键配置（自动检测已安装的编辑器）
+pygitnexus setup
+
+# 或手动启动
+pygitnexus mcp
+```
+
+### MCP 工具列表
+
+| 工具 | 必需参数 | 可选参数 | 说明 |
+|------|----------|----------|------|
+| `list_repos` | 无 | 无 | 列出所有已索引仓库 |
+| `query` | `query` | `limit`, `repo` | 搜索符号（类、方法、文件） |
+| `context` | `name` | `repo` | 查看符号的调用者、被调用者、import |
+| `cypher` | `query` | `repo` | 执行原始 Cypher 查询 |
+| `impact` | `target` | `direction`, `maxDepth`, `relationTypes`, `repo` 等 | 分析修改的影响范围（Blast Radius） |
+| `detect_changes` | 无 | `scope`, `base_ref`, `repo` | 分析 git 未提交变更的影响 |
+
+### impact 工具
+
+分析修改某个符号后的连锁影响（影响范围分析）：
+
+```
+impact(target="UserService", direction="upstream", maxDepth=3)
+```
+
+返回结果包含：
+- **风险评估**：LOW / MEDIUM / HIGH / CRITICAL
+- **按深度分组**：
+  - `d=1`: WILL BREAK（直接调用者）
+  - `d=2`: LIKELY AFFECTED（间接影响）
+  - `d=3`: MAY NEED TESTING（需要测试的范围）
+- 支持 `relationTypes` 过滤（CALLS、IMPORTS、EXTENDS、IMPLEMENTS 等）
+- 支持 `direction` 方向（upstream=谁依赖我，downstream=我依赖谁）
+
+### detect_changes 工具
+
+分析 git 未提交变更对执行流的影响：
+
+```
+detect_changes(scope="unstaged")        # 默认：未暂存变更
+detect_changes(scope="staged")          # 已暂存变更
+detect_changes(scope="all")             # 所有未提交变更
+detect_changes(scope="compare", base_ref="main")  # 与指定分支对比
+```
+
+返回：变更的符号、受影响的执行流程、风险等级。
+
+### 支持编辑器
+
+| 编辑器 | 配置文件 | 安装路径检测 |
+|--------|---------|-------------|
+| Cursor | `~/.cursor/mcp.json` | `~/.cursor/` 目录存在 |
+| Claude Code | `~/.claude.json` | `~/.claude/` 目录存在 |
+| OpenCode | `~/.config/opencode/opencode.json` | `~/.config/opencode/` 目录存在 |
+| Codex | `~/.codex/config.toml` | `~/.codex/` 目录存在 |
 
 ## 调用解析策略
 
@@ -294,7 +361,9 @@ src/pygitnexus/
 │   ├── cypher.py           # 原始 Cypher 查询
 │   ├── list.py             # 列出仓库
 │   ├── status.py           # 仓库状态
-│   └── clean.py            # 删除索引
+│   ├── clean.py            # 删除索引
+│   ├── mcp.py              # MCP Server 启动命令
+│   └── setup.py            # 编辑器 MCP 配置
 ├── core/                   # 核心分析引擎
 │   ├── scanner.py          # 文件扫描（支持 .gitignore）
 │   ├── extractor.py        # tree-sitter AST 解析 + 符号提取
@@ -304,6 +373,8 @@ src/pygitnexus/
 ├── graph/                  # 图数据库层
 │   ├── schema.py           # KuzuDB schema 定义
 │   └── store.py            # KuzuDB 操作封装 (UNWIND/COPY FROM)
+├── mcp/                    # MCP Server
+│   └── server.py           # MCP 工具定义（6 个 tools）
 ├── search/                 # 查询接口
 │   └── query.py            # 符号搜索、上下文、Cypher
 └── storage/                # 存储管理
