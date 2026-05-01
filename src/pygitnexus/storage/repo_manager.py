@@ -19,6 +19,21 @@ class RepoInfo:
     language: str = "java"
 
 
+_REPO_INFO_FIELDS = {"name", "path", "stats", "indexed_at", "language"}
+
+
+def _normalize_repo_data(raw: dict) -> dict:
+    """Normalize old registry entries to current RepoInfo fields."""
+    data = {k: v for k, v in raw.items() if k in _REPO_INFO_FIELDS}
+    # Handle camelCase -> snake_case
+    if "indexedAt" in raw and "indexed_at" not in data:
+        data["indexed_at"] = raw["indexedAt"]
+    data.setdefault("indexed_at", "")
+    data.setdefault("language", "java")
+    data.setdefault("stats", {})
+    return data
+
+
 def _ensure_registry() -> None:
     REGISTRY_DIR.mkdir(parents=True, exist_ok=True)
     if not REGISTRY_FILE.exists():
@@ -65,12 +80,12 @@ def unregister_repo(name: str) -> bool:
 def list_repos() -> list[RepoInfo]:
     """List all registered repositories."""
     registry = _read_registry()
-    return [RepoInfo(**v) for v in registry.values()]
+    return [RepoInfo(**_normalize_repo_data(v)) for v in registry.values()]
 
 
 def get_repo(name: str) -> RepoInfo | None:
     """Get a specific repository by name."""
     registry = _read_registry()
     if name in registry:
-        return RepoInfo(**registry[name])
+        return RepoInfo(**_normalize_repo_data(registry[name]))
     return None

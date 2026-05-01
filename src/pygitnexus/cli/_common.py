@@ -27,22 +27,19 @@ def load_store() -> GraphStore:
 
     Exits with an error if no repo is found or the DB doesn't exist.
     """
+    # Priority 1: Local .pygitnexus/kuzu in current directory
+    repo_path = Path(".").resolve()
+    db_path = repo_path / ".pygitnexus" / "kuzu"
+    if db_path.exists():
+        return GraphStore(db_path)
+
+    # Priority 2: Check registry
     repo = find_current_repo()
-    if repo is None:
-        # Fallback: look for .pygitnexus/kuzu in current dir tree
-        repo_path = Path(".").resolve()
-        db_path = repo_path / ".pygitnexus" / "kuzu"
-        if not db_path.exists():
-            click.echo("No indexed repository found in the current directory.")
-            click.echo("Run 'pygitnexus analyze' to index this repository.")
-            raise SystemExit(1)
-    else:
+    if repo is not None:
         db_path = Path(getattr(repo, "path", "")) / ".pygitnexus" / "kuzu"
+        if db_path.exists():
+            return GraphStore(db_path)
 
-    if not db_path.exists():
-        click.echo(f"Database not found at {db_path}")
-        click.echo("Run 'pygitnexus analyze --force' to rebuild the index.")
-        raise SystemExit(1)
-
-    store = GraphStore(db_path)
-    return store
+    click.echo("No indexed repository found in the current directory.")
+    click.echo("Run 'pygitnexus analyze' to index this repository.")
+    raise SystemExit(1)

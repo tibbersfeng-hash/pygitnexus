@@ -24,6 +24,31 @@ Java 代码库知识图谱构建工具 —— [GitNexus](https://github.com/abhi
 
 ## 安装
 
+### 方式一：下载预编译二进制文件（推荐）
+
+从 [Releases](https://github.com/YOUR_USERNAME/pygitnexus/releases) 下载对应平台的单文件可执行程序，无需安装 Python。
+
+| 平台 | 架构 | 文件名 |
+|------|------|--------|
+| Linux | x86_64 | `pygitnexus-vX.X.X-linux-x86_64` |
+| Linux | ARM64 | `pygitnexus-vX.X.X-linux-aarch64` |
+| macOS | Intel | `pygitnexus-vX.X.X-macos-x86_64` |
+| macOS | Apple Silicon | `pygitnexus-vX.X.X-macos-arm64` |
+| Windows | x86_64 | `pygitnexus-vX.X.X-windows-x86_64.exe` |
+
+下载后添加执行权限即可使用：
+
+```bash
+# Linux / macOS
+chmod +x pygitnexus-vX.X.X-linux-x86_64
+./pygitnexus-vX.X.X-linux-x86_64 --help
+
+# Windows
+pygitnexus-vX.X.X-windows-x86_64.exe --help
+```
+
+### 方式二：从源码安装
+
 ```bash
 # 需要 Python 3.12+
 uv sync

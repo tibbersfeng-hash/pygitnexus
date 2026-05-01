@@ -19,3 +19,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pygitnexus"]
+
+[dependency-groups]
+build = [
+    "pyinstaller>=6.0",
+    "nuitka>=2.0",
+]

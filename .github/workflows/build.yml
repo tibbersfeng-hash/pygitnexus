@@ -1,0 +1,90 @@
+name: Build Release Binaries
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.os }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: x86_64
+            runner: ubuntu-22.04
+          - os: linux
+            arch: aarch64
+            runner: ubuntu-22.04-arm
+          - os: macos
+            arch: x86_64
+            runner: macos-13
+          - os: macos
+            arch: arm64
+            runner: macos-14
+          - os: windows
+            arch: x86_64
+            runner: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          uv sync --group build
+
+      - name: Build with PyInstaller
+        shell: bash
+        run: |
+          uv run pyinstaller pygitnexus.spec
+
+      - name: Prepare artifact
+        shell: bash
+        run: |
+          VERSION="${{ github.ref_name || 'dev' }}"
+          EXT=""
+          [ "${{ matrix.os }}" = "windows" ] && EXT=".exe"
+          OUTDIR="release-artifacts"
+          mkdir -p "$OUTDIR"
+          cp "dist/pygitnexus${EXT}" "$OUTDIR/pygitnexus-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}${EXT}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pygitnexus-${{ matrix.os }}-${{ matrix.arch }}
+          path: release-artifacts/
+          if-no-files-found: error
+
+      - name: Upload to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-artifacts/*
+
+  checksums:
+    name: Generate checksums
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release'
+    steps:
+      - uses: actions/download-artifact@v4
+      - name: Generate SHA256
+        run: |
+          mkdir -p checksums
+          find . -type f -name 'pygitnexus-*' -exec sh -c 'sha256sum "$1" >> checksums/SHA256SUMS.txt' _ {} \;
+      - name: Upload checksums to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: checksums/SHA256SUMS.txt
