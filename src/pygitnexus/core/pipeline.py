@@ -254,6 +254,10 @@ def _write_to_graph_batched(
         field_ids: dict[tuple[str, str], str] = {}
         constructor_ids: dict[tuple[str, str], str] = {}
         class_ids: dict[tuple[str, str], str] = {}  # (class_simple_name, file_path) -> class_node_id
+
+        # First pass: generate unique IDs with dedup, store in method_ids for lookup AND node writing
+        _seen_method_ids: set[str] = set()
+        _method_object_to_id: dict[int, str] = {}  # id(method) -> final node ID
         for pf in parsed_files:
             for method in pf.methods:
                 mid = _make_method_id(
@@ -261,9 +265,16 @@ def _write_to_graph_batched(
                     method.file_path,
                     method.start_line,
                 )
+                # Handle duplicate IDs (minified JS with many same-name functions on same line)
+                if mid in _seen_method_ids:
+                    # Append global counter to ensure uniqueness
+                    mid = f"{mid}_m{len(_seen_method_ids)}"
+                _seen_method_ids.add(mid)
                 method_ids[(method.name, method.file_path)] = mid
                 if method.class_name:
                     method_ids[(f"{method.class_name}.{method.name}", method.file_path)] = mid
+                # Also store by object identity so the node-writing pass can reuse the same ID
+                _method_object_to_id[id(method)] = mid
             for field in pf.fields:
                 fid = _make_field_id(field.name, field.file_path, field.start_line)
                 field_ids[(field.name, field.file_path)] = fid
@@ -289,10 +300,14 @@ def _write_to_graph_batched(
         method_defines: list[dict] = []
         field_defines: list[dict] = []
 
+        _seen_class_ids: set[str] = set()
         for pf in parsed_files:
             file_id = _make_file_id(pf.file_path)
             for cls in pf.classes:
                 node_id = _make_class_id(cls.name, pf.file_path, cls.start_line, cls.is_interface)
+                if node_id in _seen_class_ids:
+                    node_id = f"{node_id}_n{len(_seen_class_ids)}"
+                _seen_class_ids.add(node_id)
                 class_defines.append({
                     "from_id": file_id,
                     "to_id": node_id,
@@ -361,13 +376,21 @@ def _write_to_graph_batched(
                                 "to_id": field_id,
                             })
 
-            # Methods and fields for this file
+            # Methods and fields for this file — use pre-computed IDs from first pass
+            _seen_method_ids_nodes: set[str] = set()
             for method in pf.methods:
-                method_id = _make_method_id(
-                    f"{method.class_name}.{method.name}" if method.class_name else method.name,
-                    method.file_path,
-                    method.start_line,
-                )
+                # Look up the already-deduplicated ID from first pass (single source of truth)
+                method_id = _method_object_to_id.get(id(method))
+                if method_id is None:
+                    # Fallback: should not happen, but generate ID if missing
+                    method_id = _make_method_id(
+                        f"{method.class_name}.{method.name}" if method.class_name else method.name,
+                        method.file_path,
+                        method.start_line,
+                    )
+                    if method_id in _seen_method_ids_nodes:
+                        method_id = f"{method_id}_n{len(_seen_method_ids_nodes)}"
+                    _seen_method_ids_nodes.add(method_id)
                 method_data: dict = {
                     "id": method_id,
                     "name": method.name,
@@ -396,9 +419,13 @@ def _write_to_graph_batched(
                     method_data["httpParams"] = ""
                 method_defines.append(method_data)
 
-            # 5. Write fields — build directly, no lookup needed
+            # 5. Write fields — deduplicate by ID
+            _seen_field_ids: set[str] = set()
             for field in pf.fields:
                 field_id = _make_field_id(field.name, field.file_path, field.start_line)
+                if field_id in _seen_field_ids:
+                    field_id = f"{field_id}_n{len(_seen_field_ids)}"
+                _seen_field_ids.add(field_id)
                 field_defines.append({
                     "id": field_id,
                     "name": field.name,
@@ -485,13 +512,17 @@ def _write_to_graph_batched(
         bw.insert_typed_relations("Class", "Method", has_methods, "HAS_METHOD", 1.0, "class has method")
         bw.insert_typed_relations("Interface", "Method", has_methods, "HAS_METHOD", 1.0, "interface has method")
 
-        # Insert Constructor nodes
+        # Insert Constructor nodes — deduplicate by ID
+        _seen_ctor_ids: set[str] = set()
         ctor_defines: list[dict] = []
         has_constructors: list[dict] = []
         for pf in parsed_files:
             file_id = _make_file_id(pf.file_path)
             for ctor in pf.constructors:
                 cid = _make_constructor_id(ctor.class_name, ctor.name, ctor.file_path, ctor.start_line)
+                if cid in _seen_ctor_ids:
+                    cid = f"{cid}_n{len(_seen_ctor_ids)}"
+                _seen_ctor_ids.add(cid)
                 ctor_defines.append({
                     "id": cid,
                     "name": ctor.name,
@@ -516,10 +547,14 @@ def _write_to_graph_batched(
 
         # Insert Variable nodes
         var_defines: list[dict] = []
+        var_counter: dict[str, int] = {}
         for pf in parsed_files:
             file_id = _make_file_id(pf.file_path)
             for var in pf.variables:
-                vid = _make_variable_id(var.name, var.file_path or pf.file_path, var.line)
+                base_key = f"{var.file_path or pf.file_path}:{var.name}:{var.line}"
+                idx = var_counter.get(base_key, 0)
+                var_counter[base_key] = idx + 1
+                vid = _make_variable_id(var.name, var.file_path or pf.file_path, var.line, idx)
                 var_defines.append({
                     "id": vid,
                     "name": var.name,
@@ -1002,9 +1037,10 @@ def _make_constructor_id(class_name: str, name: str, file_path: str, start_line:
     return f"Constructor_{safe_path}_{safe_class}_{name}_{start_line}"
 
 
-def _make_variable_id(name: str, file_path: str, line: int = 0) -> str:
+def _make_variable_id(name: str, file_path: str, line: int = 0, counter: int = 0) -> str:
     safe_path = file_path.replace("/", "_").replace(".", "_")
-    return f"Variable_{safe_path}_{name}_{line}"
+    suffix = f"_{counter}" if counter > 0 else ""
+    return f"Variable_{safe_path}_{name}_{line}{suffix}"
 
 
 def _make_annotation_id(ann_name: str, target_name: str, file_path: str, line: int = 0, counter: int = 0) -> str:

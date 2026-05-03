@@ -1,10 +1,14 @@
 # PyGitNexus
 
-Java 代码库知识图谱构建工具 —— [GitNexus](https://github.com/abhigyanpatwari/GitNexus) 的高性能 Python 实现。
+多语言代码库知识图谱构建工具 —— [GitNexus](https://github.com/abhigyanpatwari/GitNexus) 的高性能 Python 实现。
 
-通过静态分析 Java 源码，将项目结构、类、接口、方法、字段、调用关系等构建为 KuzuDB 知识图谱，为 AI Agent 提供深度代码感知能力。
+通过静态分析源码，将项目结构、类、接口、方法、字段、调用关系等构建为 KuzuDB 知识图谱，为 AI Agent 提供深度代码感知能力。
+
+**支持语言**: Java、JavaScript、TypeScript、Vue SFC
 
 ## 为什么是 PyGitNexus
+
+### Java 对比（shenyu 项目，3,176 文件）
 
 | 能力 | GitNexus (原版) | PyGitNexus |
 |------|----------------|-----------|
@@ -15,13 +19,25 @@ Java 代码库知识图谱构建工具 —— [GitNexus](https://github.com/abhi
 | 有效调用 | 22,074 | **25,946** (+17.5%) |
 | 3,000 文件分析 | ~8 min | **~2.2 min** |
 
+### JS/TS/Vue 对比（vue-pure-admin 项目，484 文件）
+
+| 指标 | GitNexus | PyGitNexus v11 | 召回率 |
+|------|----------|---------------|--------|
+| 全部调用 | 880 | 2,075 | - |
+| 严格匹配 | - | 815 | **92.6%** |
+| 宽松匹配 | - | 861 | **97.8%** |
+| Vue 调用召回 | - | 371/402 | **92.3%** |
+| TS 调用召回 | - | 309/335 | **100.0%** (宽松) |
+| JS 调用召回 | - | 136/143 | **100.0%** (宽松) |
+
 **关键优势**：
-- 基于 receiver 类型的精确调用解析，减少 JDK/Logger 方法误匹配
-- 跨文件 return type 传播，支持链式调用 (如 `service.getUser().getAddress()`)
+- 基于 receiver 类型的精确调用解析，减少误匹配
+- 跨文件 return type 传播，支持链式调用
 - 接口派发解析，自动追踪 interface → implementing class
 - JDK 静态方法白名单 + 常见 JDK 类黑名单，有效抑制假阳性
 - 多进程并行解析 + COPY FROM 批量写入，分析速度提升 **3.7x**
 - 预计算 AST 字节范围索引，避免重复 tree-sitter 查询（Parse 性能提升 68%）
+- Vue SFC 完整支持：`<script>` 块 + 模板表达式调用 + 组件引用 + ref `.value` 解析
 
 ## 安装
 
@@ -60,6 +76,8 @@ uv sync
 |---|------|------|
 | tree-sitter | 0.23+ | AST 解析引擎 |
 | tree-sitter-java | 0.23+ | Java 语法文件 |
+| tree-sitter-javascript | 0.23+ | JavaScript 语法文件 |
+| tree-sitter-typescript | 0.23+ | TypeScript/TSX 语法文件 |
 | kuzu | 0.11+ | 嵌入式图数据库 |
 | click | 8.1+ | CLI 框架 |
 | mcp | 1.26+ | Model Context Protocol SDK |
@@ -67,8 +85,8 @@ uv sync
 ## 快速开始
 
 ```bash
-# 索引一个 Java 项目
-cd your-java-project
+# 索引一个项目（自动识别 Java/JS/TS/Vue）
+cd your-project
 uv run pygitnexus analyze
 
 # 搜索符号
@@ -94,7 +112,7 @@ uv run pygitnexus clean
 
 | 命令 | 说明 | 示例 |
 |------|------|------|
-| `analyze [path]` | 索引 Java 项目，默认当前目录 | `analyze /path/to/project --force` |
+| `analyze [path]` | 索引项目，默认当前目录 | `analyze /path/to/project --force` |
 | `analyze --force` | 强制全量重建 | |
 | `query <keyword>` | 搜索符号 | `query "UserService" --limit 50` |
 | `context <name>` | 查看符号的调用者、被调用者、import | `context "createUser"` |
@@ -111,34 +129,36 @@ uv run pygitnexus clean
 ```
 $ pygitnexus analyze my-project
 Analyzing /path/to/my-project...
-  [  5%] Scanning for Java files...
-  [ 10%] Found 42 Java files
-  [ 15%] Parsing Java files (concurrent)...
-  [ 55%] Parsed 42/42 files
+  [  5%] Scanning for source files...
+  [ 10%] Found 150 files (80 Java, 50 TypeScript, 20 Vue)
+  [ 15%] Parsing files (concurrent)...
+  [ 55%] Parsed 150/150 files
   [ 60%] Resolving cross-file relations...
-  [ 70%] Resolved 156 calls in 0.3s
+  [ 70%] Resolved 1,234 calls in 0.8s
   [ 70%] Building knowledge graph...
-  [100%] Analysis complete (parse: 2.1s, resolve: 0.3s, graph: 1.8s)
+  [100%] Analysis complete (parse: 3.2s, resolve: 0.8s, graph: 2.1s)
 
 Analysis complete!
-  Files:    42
-  Classes:  38
-  Methods:  215
-  Fields:   89
-  Calls:    156
-  Imports:  24
+  Files:    150
+  Classes:  120
+  Methods:  890
+  Fields:   345
+  Calls:    1,234
+  Imports:  210
 ```
 
 ```
 $ pygitnexus query "User"
-Found 5 symbol(s) matching 'User':
+Found 8 symbol(s) matching 'User':
 
   [Class] com.example.User
     src/main/java/com/example/User.java:3
   [Method] User
     src/main/java/com/example/User.java:7
-  [File] User.java
-    src/main/java/com/example/User.java
+  [Class] UserStore (TypeScript)
+    src/stores/userStore.ts:12
+  [File] User.vue
+    src/views/User.vue
 ```
 
 ```
@@ -220,39 +240,41 @@ detect_changes(scope="compare", base_ref="main")  # 与指定分支对比
 
 ## 调用解析策略
 
+### Java 调用解析（4 级策略）
+
 PyGitNexus 使用 4 级递进策略解析方法调用目标，每级附带置信度评分：
 
-### Strategy 0: 构造函数调用
+#### Strategy 0: 构造函数调用
 当调用目标名称与 receiver 类型名一致时，识别为构造函数调用。
 - 精确构造器匹配 → 置信度 0.9
 - 类节点回退 → 置信度 0.85
 
-### Strategy 1: 已知 receiver 类型（来自局部变量类型推断）
+#### Strategy 1: 已知 receiver 类型（来自局部变量类型推断）
 - 精确类名.方法名匹配 → 置信度 0.9
 - Builder 模式识别 (`build/builder/newBuilder`) → 置信度 0.85
 - 接口派发 (interface → implementing class) → 置信度 0.6
 - 类名后缀匹配 → 置信度 0.8
 - 方法名 + 类名相似度匹配 → 置信度 0.5
 
-### Strategy 1.5: 跨文件 return type 传播
+#### Strategy 1.5: 跨文件 return type 传播
 当 receiver 类型未知但 receiver 名称匹配已知方法时，用该方法的返回类型解析调用。
 ```java
 // service.getUser().getAddress() — getAddress() 的 receiver "getUser" 返回 User
 // 因此将 getAddress() 解析到 User 类
 ```
 
-### Strategy 2: receiver 是已知类名（静态调用）
+#### Strategy 2: receiver 是已知类名（静态调用）
 - 静态字段类型推断 → 置信度 0.75
 - 精确类名匹配 → 置信度 0.9
 - 类名后缀匹配 → 置信度 0.8
 - 方法名全局匹配（仅大写开头的类名）→ 置信度 0.5
 
-### Strategy 3: 无 receiver（同类调用 / 静态导入）
+#### Strategy 3: 无 receiver（同类调用 / 静态导入）
 - 同类方法匹配 → 置信度 0.7
 - 继承链追溯 → 置信度 0.65
 - 测试框架静态导入白名单 (JUnit/Mockito/Hamcrest) → 置信度 0.3
 
-### JDK 假阳性抑制
+#### JDK 假阳性抑制
 
 | 机制 | 说明 |
 |------|------|
@@ -261,21 +283,46 @@ PyGitNexus 使用 4 级递进策略解析方法调用目标，每级附带置信
 | 常见 JDK 方法过滤 | `get/set/add/isEmpty/toString/equals` 等在回退匹配中被跳过 |
 | 测试框架白名单 | 仅 JUnit/Mockito/Hamcrest 的断言方法允许全局名称匹配 |
 
+### JS/TS/Vue 调用解析（6 Case 策略）
+
+JS/TS/Vue 采用基于 import/export 映射 + 变量类型推断的 6 Case 解析策略：
+
+| Case | 场景 | 示例 |
+|------|------|------|
+| 1 | import 映射：跨文件导入解析 | `import { foo } from './utils'` → `foo()` |
+| 2 | import 别名：`as` 别名解析 | `import { foo as bar } from './utils'` → `bar()` |
+| 3 | 同文件类引用：`new X()` 和类作为值 | `new ImageCapture()` → `ImageCapture` |
+| 3b | 同文件类引用：类名作为函数参数 | `register(PureHttp)` → `PureHttp` |
+| 4 | 变量链解析：追踪变量赋值和返回类型 | `const user = getUser(); user.getName()` |
+| 5 | 模块级调用：包级函数/箭头函数调用 | `setupStore()` 在模块级别调用 |
+| 6 | Vue ref `.value` 解析：`h(component, { ref })` 模式 | `formRef.value.getRef()` → 组件方法 |
+
+#### Vue SFC 特殊处理
+
+- **`<script>` 块解析**：提取组件名、props、setup 函数、computed、watch
+- **模板表达式调用**：`@click="handleSubmit"`、`{{ formatName() }}`
+- **组件引用**：`<component :is="DynamicComponent">`
+- **ref 模式**：`h(Button, { ref: btnRef })` → `btnRef.value.focus()`
+- **Pinia store**：`state: () => ({...})` 中箭头函数正确命名
+
 ## 知识图谱 Schema
 
 ### 节点表
 
 | 表名 | 字段 | 说明 |
 |------|------|------|
-| `File` | id, name, filePath, content | Java 源文件 |
+| `File` | id, name, filePath, content | 源文件（Java/JS/TS/Vue） |
 | `Folder` | id, name, filePath | 文件夹 |
-| `Class` | id, name, filePath, startLine, endLine, isPublic, isAbstract, isInterface, content | 类 |
+| `Class` | id, name, filePath, startLine, endLine, isPublic, isAbstract, isInterface, content | 类/组件 |
 | `Interface` | id, name, filePath, startLine, endLine, isPublic, content | 接口 |
-| `Method` | id, name, className, filePath, startLine, endLine, returnType, parameterCount, isStatic, isPublic, isConstructor, content | 方法 |
-| `Field` | id, name, typeName, className, filePath, startLine, endLine, isStatic, isPublic | 字段 |
+| `TypeAlias` | id, name, filePath, startLine, endLine, content | TypeScript 类型别名 |
+| `Enum` | id, name, filePath, startLine, endLine, content | TypeScript 枚举 |
+| `Method` | id, name, className, filePath, startLine, endLine, returnType, parameterCount, isStatic, isPublic, isConstructor, content | 方法/函数 |
+| `Field` | id, name, typeName, className, filePath, startLine, endLine, isStatic, isPublic | 字段/属性 |
 | `Constructor` | id, name, className, filePath, startLine, endLine, parameterCount, isPublic, content | 构造器 |
 | `Variable` | id, name, typeName, methodName, className, filePath, line, isFinal | 局部变量 |
-| `Annotation` | id, name, targetType, targetName, filePath, line, attributes | 注解 |
+| `Annotation` | id, name, targetType, targetName, filePath, line, attributes | 注解/装饰器 |
+| `Export` | id, name, filePath, kind | 导出声明（JS/TS） |
 
 ### 关系表
 
@@ -294,33 +341,25 @@ PyGitNexus 使用 4 级递进策略解析方法调用目标，每级附带置信
 | `HAS_CONSTRUCTOR` | Class → Constructor | 类包含的构造器 |
 | `HAS_ANNOTATION` | Class/Method/Field → Annotation | 注解关联 |
 | `ACCESSES` | Method/Constructor → Field | 字段访问 |
+| `EXPORTS` | File → Method/Class/Variable | 导出关系（JS/TS） |
 
 ## 分析管线
 
 ```
 analyze(repo_path)
-  ├── [1] scanner.scan()              → List[JavaFile]       文件扫描（支持 .gitignore）
+  ├── [1] scanner.scan()              → List[SourceFile]     文件扫描（支持 .gitignore）
+  │       ├── .java → language="java"
+  │       ├── .js/.jsx → language="js"
+  │       ├── .ts/.tsx → language="ts"
+  │       └── .vue → language="vue"
   ├── [2] extractor.parse()           → ParsedFile           tree-sitter AST 解析
-  │       ├── 类/接口定义 + extends/implements
-  │       ├── 方法定义 + 参数 + 返回值
-  │       ├── 字段定义 + 类型
-  │       ├── 构造函数定义
-  │       ├── 局部变量声明
-  │       ├── 方法调用站点 (CallSite) + receiver 类型推断
-  │       ├── 字段访问 (FieldAccess)
-  │       ├── import 语句
-  │       └── 注解 (Annotation)
-  ├── [3] resolver.resolve_calls()    → 跨文件调用关系       4 级解析策略 + 置信度
-  │       ├── import → FQN class → 文件路径映射
-  │       ├── simple name → FQN 反向索引
-  │       ├── receiver type 精确匹配
-  │       ├── interface 派发
-  │       ├── Builder 模式识别
-  │       ├── 跨文件 return type 传播
-  │       ├── 静态字段类型推断
-  │       ├── 继承链追溯
-  │       ├── JDK 假阳性抑制
-  │       └── 测试框架静态导入白名单
+  │       ├── Java extractor: 类/接口/方法/字段/构造器/变量/调用/注解
+  │       ├── JS extractor: 函数/类/箭头函数/导入导出/调用/require
+  │       ├── TS extractor: JS 全部 + interface/type/enum/装饰器/类型注解
+  │       └── Vue extractor: <script> 块 + 模板表达式 + 组件引用 + ref 模式
+  ├── [3] resolver.resolve_calls()    → 跨文件调用关系       多语言解析策略 + 置信度
+  │       ├── Java: 4 级类型感知策略
+  │       └── JS/TS/Vue: 6 Case import/export + 变量链 + ref 解析
   ├── [4] GraphStore.init_schema()    → 创建 KuzuDB schema
   ├── [5] GraphStore.batch_write()    → 写入节点和关系
   │       ├── UNWIND 批量节点插入
@@ -330,7 +369,7 @@ analyze(repo_path)
 
 ## 性能
 
-基于 shenyu 项目（3,176 Java 文件）的基准测试：
+### Java 性能（shenyu 项目，3,176 文件）
 
 | 阶段 | GitNexus 原版 | 首次优化 | 当前版本 | 总改善 |
 |------|--------------|---------|---------|--------|
@@ -338,6 +377,16 @@ analyze(repo_path)
 | Resolve (调用解析) | ~183s | 22s | **18s** | **-90%** |
 | Graph (知识图谱) | ~150s | 93s | **63s** | **-58%** |
 | **总计** | **~496s (~8.3 min)** | **~194s (~3.2 min)** | **~133s (~2.2 min)** | **-73%** |
+
+### JS/TS/Vue 覆盖率（vue-pure-admin 项目，484 文件）
+
+| 版本 | 整体召回率 | Vue 召回率 | TS 召回率 | JS 召回率 | 调用数 |
+|------|-----------|-----------|----------|----------|--------|
+| v0 | 30.6% | 0% | 30.4% | - | 112 |
+| v7 | 80.3% | 80.3% | 80.3% | - | 664 |
+| v8 | 89.5% | 91.8% | 89.3% | 83.9% | 1,944 |
+| **v11** | **92.6%** | **92.3%** | **92.2%** | **95.1%** | **2,075** |
+| **宽松** | **97.8%** | **95.3%** | **100.0%** | **100.0%** | - |
 
 ## 存储布局
 
@@ -367,10 +416,14 @@ src/pygitnexus/
 │   └── setup.py            # 编辑器 MCP 配置
 ├── core/                   # 核心分析引擎
 │   ├── scanner.py          # 文件扫描（支持 .gitignore）
-│   ├── extractor.py        # tree-sitter AST 解析 + 符号提取
-│   ├── resolver.py         # 跨文件 import/call 解析（4 级策略）
-│   ├── pipeline.py         # 管线编排 + 并行调度
-│   └── models.py           # 数据模型
+│   ├── extractor.py        # Java tree-sitter AST 解析
+│   ├── extractor_js.py     # JavaScript AST 解析
+│   ├── extractor_ts.py     # TypeScript/TSX AST 解析
+│   ├── extractor_vue.py    # Vue SFC 解析
+│   ├── resolver.py         # Java 跨文件调用解析（4 级策略）
+│   ├── resolver_js.py      # JS/TS/Vue 调用解析（6 Case 策略）
+│   ├── pipeline.py         # 多语言管线编排 + 并行调度
+│   └── models.py           # 数据模型（SourceFile, ParsedFile, etc.）
 ├── graph/                  # 图数据库层
 │   ├── schema.py           # KuzuDB schema 定义
 │   └── store.py            # KuzuDB 操作封装 (UNWIND/COPY FROM)
@@ -384,7 +437,7 @@ src/pygitnexus/
 
 ## 准确率验证
 
-在 shenyu 项目上与 GitNexus 原版进行全量对比（429 个方法级方法）：
+### Java（shenyu 项目，3,176 文件）
 
 | 指标 | GitNexus | PyGitNexus |
 |------|----------|-----------|
@@ -408,7 +461,43 @@ src/pygitnexus/
 
 GitNexus 独有调用中约 2,000+ 条为已知的 JDK/Logger 方法误匹配假阳性。
 
-验证命令：
+### JS/TS/Vue（vue-pure-admin 项目，484 文件）
+
+| 指标 | 值 |
+|------|-----|
+| 严格召回率 | 92.6% |
+| 宽松召回率 | 97.8% |
+| TS 宽松召回率 | 100.0% |
+| JS 宽松召回率 | 100.0% |
+| Vue 宽松召回率 | 95.3% |
+
+剩余差距主要来自：
+- CSS `:deep()` 伪选择器被 GitNexus 误识别为函数调用（~6 条，PyGitNexus 正确忽略）
+- Vue 模板属性值引用（~3 条，非真实函数调用）
+- Vue 组件构造函数引用（~1 条）
+- 外部包方法链（~1 条）
+- Vue 自引用组件（~1 条）
+- 跨文件未导出函数（~1 条）
+
+### 回归测试
+
+PyGitNexus 内置回归测试脚本，确保多语言解析器互不影响：
+
 ```bash
-python tests/compare_calls.py /path/to/java/project
+# Java 回归测试（shenyu 项目，3,176 文件）
+uv run python tests/regression_shenyu.py
+```
+
+测试内容：
+1. Java 文件扫描完整性（>3000 文件）
+2. Java 文件解析完整性（Class/Method/Call 数量验证）
+3. Java 调用解析完整性
+4. JS/TS 解析器 import 隔离（无交叉导入）
+5. 完整流水线运行（全量 Java 解析 + 调用解析）
+
+### 对比测试
+
+```bash
+# JS/TS/Vue 自动化对比测试
+python tests/compare_calls.py /path/to/js-ts-project
 ```

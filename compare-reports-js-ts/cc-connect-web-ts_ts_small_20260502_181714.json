@@ -1,0 +1,25 @@
+{
+  "timestamp": "2026-05-02 18:17:14",
+  "repo": "cc-connect-web-ts",
+  "lang": "ts",
+  "size": "small",
+  "query_results": {
+    "Class count": {
+      "gitnexus": 2,
+      "pygitnexus": 2,
+      "match": true
+    },
+    "Interface count": {
+      "gitnexus": 44,
+      "pygitnexus": 44,
+      "match": true
+    },
+    "Total functions": {
+      "gitnexus": 171,
+      "pygitnexus": 171,
+      "match": true
+    }
+  },
+  "query_match_rate": 1.0,
+  "elapsed": 8.554473638534546
+}

@@ -1,0 +1,40 @@
+{
+  "timestamp": "2026-05-02 03:18:57",
+  "repo": "custom",
+  "lang": "ts",
+  "size": "custom",
+  "query_results": {
+    "File count": {
+      "gitnexus": 7,
+      "pygitnexus": -1,
+      "match": false
+    },
+    "Class count": {
+      "gitnexus": 4,
+      "pygitnexus": -1,
+      "match": false
+    },
+    "Method count": {
+      "gitnexus": 14,
+      "pygitnexus": -1,
+      "match": false
+    },
+    "Interface count": {
+      "gitnexus": 2,
+      "pygitnexus": -1,
+      "match": false
+    },
+    "Field count": {
+      "gitnexus": -1,
+      "pygitnexus": -1,
+      "match": false
+    },
+    "Constructor count": {
+      "gitnexus": 0,
+      "pygitnexus": -1,
+      "match": false
+    }
+  },
+  "query_match_rate": 0.0,
+  "elapsed": 0
+}

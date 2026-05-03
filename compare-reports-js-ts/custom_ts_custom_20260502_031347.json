@@ -1,0 +1,136 @@
+{
+  "timestamp": "2026-05-02 03:13:47",
+  "repo": "custom",
+  "lang": "ts",
+  "size": "custom",
+  "gitnexus_stats": {
+    "_error": "Runtime exception: Unable to open database. The file is not a valid Kuzu database file!"
+  },
+  "pygitnexus_stats": {
+    "_error": "Binder exception: Only standalone table functions can be called without return statement."
+  },
+  "schema_comparison": [],
+  "query_comparison": [
+    {
+      "query_name": "File count",
+      "query": "MATCH (f:File) RETURN count(f) as cnt",
+      "gitnexus": [
+        {
+          "_error": "Runtime exception: Unable to open database. The file is not a valid Kuzu database file!"
+        }
+      ],
+      "pygitnexus": [
+        {
+          "cnt": 5
+        }
+      ]
+    },
+    {
+      "query_name": "Class count",
+      "query": "MATCH (c:Class) RETURN count(c) as cnt",
+      "gitnexus": [
+        {
+          "_error": "Runtime exception: Unable to open database. The file is not a valid Kuzu database file!"
+        }
+      ],
+      "pygitnexus": [
+        {
+          "cnt": 4
+        }
+      ]
+    },
+    {
+      "query_name": "Interface count",
+      "query": "MATCH (i:Interface) RETURN count(i) as cnt",
+      "gitnexus": [
+        {
+          "_error": "Runtime exception: Unable to open database. The file is not a valid Kuzu database file!"
+        }
+      ],
+      "pygitnexus": [
+        {
+          "cnt": 2
+        }
+      ]
+    },
+    {
+      "query_name": "Method count",
+      "query": "MATCH (m:Method) RETURN count(m) as cnt",
+      "gitnexus": [
+        {
+          "_error": "Runtime exception: Unable to open database. The file is not a valid Kuzu database file!"
+        }
+      ],
+      "pygitnexus": [
+        {
+          "cnt": 15
+        }
+      ]
+    },
+    {
+      "query_name": "Field count",
+      "query": "MATCH (f:Field) RETURN count(f) as cnt",
+      "gitnexus": [
+        {
+          "_error": "Runtime exception: Unable to open database. The file is not a valid Kuzu database file!"
+        }
+      ],
+      "pygitnexus": [
+        {
+          "cnt": 4
+        }
+      ]
+    },
+    {
+      "query_name": "Constructor count",
+      "query": "MATCH (c:Constructor) RETURN count(c) as cnt",
+      "gitnexus": [
+        {
+          "_error": "Runtime exception: Unable to open database. The file is not a valid Kuzu database file!"
+        }
+      ],
+      "pygitnexus": [
+        {
+          "cnt": 4
+        }
+      ]
+    },
+    {
+      "query_name": "CALLS relation count",
+      "query": "MATCH ()-[r:CodeRelation {type: 'CALLS'}]->() RETURN count(r) as cnt",
+      "gitnexus": [
+        {
+          "_error": "Runtime exception: Unable to open database. The file is not a valid Kuzu database file!"
+        }
+      ],
+      "pygitnexus": [
+        {
+          "cnt": 0
+        }
+      ]
+    },
+    {
+      "query_name": "Total relations",
+      "query": "MATCH ()-[r]->() RETURN count(r) as cnt",
+      "gitnexus": [
+        {
+          "_error": "Runtime exception: Unable to open database. The file is not a valid Kuzu database file!"
+        }
+      ],
+      "pygitnexus": [
+        {
+          "cnt": 63
+        }
+      ]
+    }
+  ],
+  "accuracy": {
+    "schema_match_rate": 0,
+    "query_match_rate": 0.125,
+    "overall_accuracy": 0.0625,
+    "matching_tables": 0,
+    "total_tables": 0,
+    "matching_queries": 1,
+    "total_queries": 8
+  }
+}

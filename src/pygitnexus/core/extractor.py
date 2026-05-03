@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import threading
 
 import tree_sitter_java as tsjava
@@ -238,6 +239,9 @@ def _extract_modifiers(node: ts.Node, source: bytes) -> str:
 
 def parse(file_path: str, content: bytes) -> ParsedFile:
     """Parse a single Java file and extract all symbols."""
+    # Tree-sitter query cursor recursively walks the AST — raise limit to
+    # accommodate deeply nested files (e.g. XmlToJson with 100+ if/else levels).
+    sys.setrecursionlimit(10000)
     lang = _get_lang()
     with _parser_lock:
         parser = _get_parser()

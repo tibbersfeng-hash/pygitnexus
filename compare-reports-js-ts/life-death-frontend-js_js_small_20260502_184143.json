@@ -1,0 +1,25 @@
+{
+  "timestamp": "2026-05-02 18:41:43",
+  "repo": "life-death-frontend-js",
+  "lang": "js",
+  "size": "small",
+  "query_results": {
+    "Class count": {
+      "gitnexus": 1,
+      "pygitnexus": 1,
+      "match": true
+    },
+    "Interface count": {
+      "gitnexus": 0,
+      "pygitnexus": 0,
+      "match": true
+    },
+    "Total functions": {
+      "gitnexus": 270,
+      "pygitnexus": 270,
+      "match": true
+    }
+  },
+  "query_match_rate": 1.0,
+  "elapsed": 11.836897373199463
+}
