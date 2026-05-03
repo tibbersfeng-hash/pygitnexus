@@ -13,6 +13,7 @@ from .context import context_cmd
 from .cypher import cypher_cmd
 from .mcp import mcp_cmd
 from .setup import setup_cmd
+from .group import group_cmd
 
 
 @click.group()
@@ -31,6 +32,7 @@ cli.add_command(context_cmd)
 cli.add_command(cypher_cmd)
 cli.add_command(mcp_cmd)
 cli.add_command(setup_cmd)
+cli.add_command(group_cmd)
 
 
 if __name__ == "__main__":

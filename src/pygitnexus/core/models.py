@@ -7,15 +7,20 @@ from pathlib import Path
 
 
 @dataclass
-class JavaFile:
-    """A Java source file ready for parsing."""
+class SourceFile:
+    """A source file ready for parsing."""
     path: Path
     relative: str  # relative to project root
     content: bytes
+    lang: str  # "java", "js", "ts"
 
     @property
     def text(self) -> str:
         return self.content.decode("utf-8", errors="replace")
+
+
+# Backward compatibility alias
+JavaFile = SourceFile
 
 
 @dataclass
@@ -79,6 +84,10 @@ class CallSite:
     line: int = 0
     receiver: str | None = None  # object/class name or None for static/free
     receiver_type: str | None = None  # resolved type of receiver
+    # For HTTP API calls: extracted endpoint info
+    http_method: str | None = None  # e.g. "GET", "POST", "PATCH"
+    http_path: str | None = None  # e.g. "/cron", "/projects/{id}"
+    http_params: str | None = None  # extracted param info as JSON string
 
 
 @dataclass
@@ -137,8 +146,38 @@ class AnnotationDef:
 
 
 @dataclass
+class TypeAliasDef:
+    """A TypeScript type alias definition."""
+    name: str
+    file_path: str
+    start_line: int
+    end_line: int
+    content: str = ""
+
+
+@dataclass
+class EnumDef:
+    """A TypeScript enum definition."""
+    name: str
+    file_path: str
+    start_line: int
+    end_line: int
+    is_const: bool = False
+    content: str = ""
+
+
+@dataclass
+class ExportDecl:
+    """A JS/TS export declaration."""
+    name: str  # exported symbol name
+    kind: str  # "class", "function", "variable", "default", "namespace"
+    file_path: str
+    line: int = 0
+
+
+@dataclass
 class ParsedFile:
-    """Complete parse result for a single Java file."""
+    """Complete parse result for a single source file."""
     file_path: str  # relative path
     classes: list[ClassDef] = field(default_factory=list)
     methods: list[MethodDef] = field(default_factory=list)
@@ -149,3 +188,6 @@ class ParsedFile:
     calls: list[CallSite] = field(default_factory=list)
     field_accesses: list[FieldAccess] = field(default_factory=list)
     imports: list[ImportDecl] = field(default_factory=list)
+    type_aliases: list[TypeAliasDef] = field(default_factory=list)
+    enums: list[EnumDef] = field(default_factory=list)
+    exports: list[ExportDecl] = field(default_factory=list)

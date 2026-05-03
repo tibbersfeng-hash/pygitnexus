@@ -22,6 +22,10 @@ class GraphStore:
         self._db = kuzu.Database(str(db_path))
         self._conn = kuzu.Connection(self._db)
 
+    def get_connection(self) -> kuzu.Connection:
+        """Return the underlying KuzuDB connection."""
+        return self._conn
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -135,10 +139,12 @@ class GraphStore:
         try:
             with open(rel_csv, "w", newline="") as f:
                 writer = csv.writer(f)
-                writer.writerow(["from_id", "to_id", "type", "confidence", "reason"])
+                writer.writerow(["from_id", "to_id", "type", "confidence", "reason",
+                                 "httpMethod", "httpPath", "httpParams"])
                 reason = f"file defines {table.lower()}"
                 for row in rows:
-                    writer.writerow([row["from_id"], row["id"], rel_type, "1.0", reason])
+                    writer.writerow([row["from_id"], row["id"], rel_type, "1.0", reason,
+                                     "", "", ""])
             self._execute(
                 f"COPY CodeRelation FROM '{rel_csv}' "
                 f"(header=true, from='{from_table}', to='{table}')"
@@ -226,23 +232,32 @@ class GraphStore:
         relations: list[dict],
         rel_type: str,
         reason: str,
+        extra_columns: list[str] | None = None,
     ) -> None:
         """Insert relations using COPY FROM CSV for maximum throughput.
 
         Each relation dict must have 'from_id', 'to_id', and 'confidence' keys.
         Uses a temporary CSV file and Kuzu's COPY command with explicit FROM/TO.
+
+        Args:
+            extra_columns: Optional list of additional column names to include.
         """
         if not relations:
             return
         csv_path = os.path.join(tempfile.gettempdir(), f"kuzu_rel_{os.getpid()}.csv")
+        cols = ["from_id", "to_id", "type", "confidence", "reason"]
+        if extra_columns:
+            cols.extend(extra_columns)
         try:
             with open(csv_path, "w", newline="") as f:
                 writer = csv.writer(f)
-                writer.writerow(["from_id", "to_id", "type", "confidence", "reason"])
+                writer.writerow(cols)
                 for r in relations:
-                    writer.writerow([
-                        r["from_id"], r["to_id"], rel_type, r["confidence"], reason,
-                    ])
+                    row = [r["from_id"], r["to_id"], rel_type, r["confidence"], reason]
+                    if extra_columns:
+                        for col in extra_columns:
+                            row.append(r.get(col, "") or "")
+                    writer.writerow(row)
             self._execute(
                 f"COPY CodeRelation FROM '{csv_path}' "
                 f"(header=true, from='{from_table}', to='{to_table}')"

@@ -9,10 +9,14 @@ import sys
 from pathlib import Path
 
 import tree_sitter_java
+import tree_sitter_javascript
+import tree_sitter_typescript
 import kuzu
 
 # Discover native library paths
 tsjava_dir = Path(tree_sitter_java.__file__).parent
+tsjs_dir = Path(tree_sitter_javascript.__file__).parent
+tsts_dir = Path(tree_sitter_typescript.__file__).parent
 kuzu_dir = Path(kuzu.__file__).parent
 
 block_cipher = None
@@ -41,9 +45,22 @@ hiddenimports = [
     # Core
     "pygitnexus.core.pipeline",
     "pygitnexus.core.extractor",
+    "pygitnexus.core.extractor_js",
+    "pygitnexus.core.extractor_ts",
     "pygitnexus.core.resolver",
     "pygitnexus.core.scanner",
     "pygitnexus.core.models",
+    "pygitnexus.core.resolver_js",
+    # Group
+    "pygitnexus.core.group",
+    "pygitnexus.core.group.config_parser",
+    "pygitnexus.core.group.storage",
+    "pygitnexus.core.group.contract_extractor",
+    "pygitnexus.core.group.matching",
+    "pygitnexus.core.group.bridge_db",
+    "pygitnexus.core.group.cross_impact",
+    "pygitnexus.core.group.sync",
+    "pygitnexus.cli.group",
     # Graph
     "pygitnexus.graph.schema",
     "pygitnexus.graph.store",
@@ -55,9 +72,11 @@ hiddenimports = [
     "pygitnexus.mcp.server",
 ]
 
-# Data files: tree-sitter-java grammars + kuzu native libs
+# Data files: tree-sitter grammars + kuzu native libs
 datas = [
     (str(tsjava_dir), "tree_sitter_java"),
+    (str(tsjs_dir), "tree_sitter_javascript"),
+    (str(tsts_dir), "tree_sitter_typescript"),
 ]
 
 # Kuzu native libs vary by platform

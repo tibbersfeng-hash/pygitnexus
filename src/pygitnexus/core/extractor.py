@@ -1818,7 +1818,12 @@ def _find_child_by_type(node: ts.Node, type_name: str) -> ts.Node | None:
 
 
 def _extract_annotation_attributes(annotation_node: ts.Node, source: bytes) -> dict[str, str]:
-    """Extract key=value attributes from an annotation node."""
+    """Extract attributes from an annotation node.
+
+    Handles both styles:
+    1. element_value_pair: @PostMapping(value = "/tasks") → {"value": "/tasks"}
+    2. Direct string argument: @GetMapping("/cron") → {"path": "/cron"}
+    """
     attrs: dict[str, str] = {}
     for child in annotation_node.children:
         if child.type == "annotation_argument_list":
@@ -1828,9 +1833,26 @@ def _extract_annotation_attributes(annotation_node: ts.Node, source: bytes) -> d
                     if key_node:
                         key = _node_text(key_node, source)
                         idx = arg.children.index(key_node)
-                        if idx + 1 < len(arg.children):
-                            attrs[key] = _node_text(arg.children[idx + 1], source)
+                        # element_value_pair structure: identifier = value
+                        # Skip the '=' (idx+1) and take the actual value (idx+2)
+                        if idx + 2 < len(arg.children):
+                            value_node = arg.children[idx + 2]
+                            value = _node_text(value_node, source)
+                            if value_node.type == "string_literal":
+                                value = _strip_string_quotes(value)
+                            attrs[key] = value
+                elif arg.type == "string_literal":
+                    # Direct string argument (e.g., @GetMapping("/path"))
+                    raw = _node_text(arg, source)
+                    attrs["path"] = _strip_string_quotes(raw)
     return attrs
+
+
+def _strip_string_quotes(s: str) -> str:
+    """Strip surrounding quotes from a Java string literal."""
+    if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+        return s[1:-1]
+    return s
 
 
 def _extract_field_accesses(

@@ -1,20 +1,35 @@
-"""Scan a directory for Java source files, respecting .gitignore rules."""
+"""Scan a directory for source files, respecting .gitignore rules."""
 
 from __future__ import annotations
 
 import fnmatch
 from pathlib import Path
 
-from .models import JavaFile
+from .models import SourceFile
 
 # Directories and patterns to skip
 DEFAULT_SKIP_DIRS = {
     ".git", ".svn", ".hg", "node_modules", "target", "build",
     "out", ".idea", ".settings", ".classpath", ".project",
     "__pycache__", ".tox", ".venv", "venv",
+    "dist", ".next", ".nuxt", ".vite",
 }
 
-JAVA_EXTENSIONS = {".java"}
+# File extensions by language
+LANG_EXTENSIONS = {
+    ".java": "java",
+    ".js": "js", ".jsx": "js",
+    ".ts": "ts", ".tsx": "ts",
+    ".vue": "vue",
+}
+
+SUPPORTED_EXTENSIONS = set(LANG_EXTENSIONS.keys())
+
+
+def detect_language(path: str | Path) -> str | None:
+    """Detect language from file extension."""
+    ext = Path(path).suffix.lower()
+    return LANG_EXTENSIONS.get(ext)
 
 
 def _parse_gitignore(root: Path) -> list[str]:
@@ -47,10 +62,10 @@ def _is_ignored(rel_path: str, patterns: list[str]) -> bool:
     return False
 
 
-def scan(root: str | Path) -> list[JavaFile]:
-    """Scan a directory tree for Java source files.
+def scan(root: str | Path) -> list[SourceFile]:
+    """Scan a directory tree for supported source files.
 
-    Returns a list of JavaFile objects sorted by relative path.
+    Returns a list of SourceFile objects sorted by relative path.
     """
     root = Path(root) if isinstance(root, str) else root
     root = root.resolve()
@@ -59,31 +74,37 @@ def scan(root: str | Path) -> list[JavaFile]:
         raise ValueError(f"Not a directory: {root}")
 
     patterns = _parse_gitignore(root)
-    results: list[JavaFile] = []
+    results: list[SourceFile] = []
 
-    for path in sorted(root.rglob("*.java")):
-        if not path.is_file():
-            continue
+    for ext in sorted(SUPPORTED_EXTENSIONS):
+        for path in sorted(root.rglob(f"*{ext}")):
+            if not path.is_file():
+                continue
 
-        # Skip directories in DEFAULT_SKIP_DIRS
-        rel = str(path.relative_to(root))
-        rel_parts = path.relative_to(root).parts
-        if any(part in DEFAULT_SKIP_DIRS for part in rel_parts):
-            continue
+            # Skip directories in DEFAULT_SKIP_DIRS
+            rel = str(path.relative_to(root))
+            rel_parts = path.relative_to(root).parts
+            if any(part in DEFAULT_SKIP_DIRS for part in rel_parts):
+                continue
 
-        # Check .gitignore patterns
-        if _is_ignored(rel, patterns):
-            continue
+            # Check .gitignore patterns
+            if _is_ignored(rel, patterns):
+                continue
 
-        try:
-            content = path.read_bytes()
-        except (OSError, PermissionError):
-            continue
+            lang = detect_language(path)
+            if lang is None:
+                continue
 
-        results.append(JavaFile(
-            path=path,
-            relative=rel,
-            content=content,
-        ))
+            try:
+                content = path.read_bytes()
+            except (OSError, PermissionError):
+                continue
+
+            results.append(SourceFile(
+                path=path,
+                relative=rel,
+                content=content,
+                lang=lang,
+            ))
 
     return results

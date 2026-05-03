@@ -9,8 +9,12 @@ from pathlib import Path
 
 from ..core.models import ParsedFile
 from ..core.scanner import scan
-from ..core.extractor import parse
+from ..core.extractor import parse as parse_java
+from ..core.extractor_js import parse as parse_js
+from ..core.extractor_ts import parse as parse_ts
+from ..core.extractor_vue import parse as parse_vue
 from ..core.resolver import resolve_calls, resolve_imports
+from ..core.resolver_js import resolve_js_ts_calls
 from ..graph.store import GraphStore
 from ..storage.repo_manager import register_repo, RepoInfo
 
@@ -46,22 +50,32 @@ def run_analysis(
     _progress._last_msg = ""
 
     # Step 1: Scan
-    _progress(5, "Scanning for Java files...")
-    java_files = scan(repo_path)
-    _progress(10, f"Found {len(java_files)} Java files")
+    _progress(5, "Scanning for source files...")
+    source_files = scan(repo_path)
+    _progress(10, f"Found {len(source_files)} source files")
 
     # Step 2: Parse files concurrently (ThreadPoolExecutor — tree-sitter releases GIL)
-    _progress(15, "Parsing Java files (concurrent)...")
+    _progress(15, "Parsing files (concurrent)...")
     t0 = time.monotonic()
-    parsed_files = _parse_concurrent(java_files, _progress, len(java_files))
+    parsed_files = _parse_concurrent(source_files, _progress, len(source_files))
     parse_elapsed = time.monotonic() - t0
-    _progress(55, f"Parsed {len(parsed_files)}/{len(java_files)} files in {parse_elapsed:.1f}s")
+    _progress(55, f"Parsed {len(parsed_files)}/{len(source_files)} files in {parse_elapsed:.1f}s")
 
     # Step 3: Resolve cross-file relations (chunked parallel)
     _progress(60, "Resolving cross-file relations...")
     class_map = resolve_imports(parsed_files)
     t_resolve = time.monotonic()
     call_relations = _resolve_calls_parallel(parsed_files, class_map)
+
+    # Step 3b: Resolve JS/TS cross-file calls via ES Module imports
+    js_ts_relations = resolve_js_ts_calls(parsed_files, project_root=str(repo_path))
+    call_relations.extend(js_ts_relations)
+
+    # Step 3c: Enrich Java CALLS relations with Spring endpoint info
+    # Build (method_name, file_path) → (http_method, http_path) from controller annotations
+    spring_endpoint_map = _build_spring_endpoint_map(parsed_files)
+    call_relations = _enrich_java_calls(call_relations, spring_endpoint_map)
+
     resolve_elapsed = time.monotonic() - t_resolve
     _progress(70, f"Resolved {len(call_relations)} calls in {resolve_elapsed:.1f}s")
 
@@ -70,7 +84,7 @@ def run_analysis(
     t1 = time.monotonic()
     store = GraphStore(db_path)
     store.init_schema()
-    _write_to_graph_batched(store, parsed_files, java_files, repo_path, call_relations, class_map)
+    _write_to_graph_batched(store, parsed_files, source_files, repo_path, call_relations, class_map, spring_endpoint_map)
     graph_elapsed = time.monotonic() - t1
     _progress(95, f"Graph built in {graph_elapsed:.1f}s")
 
@@ -89,12 +103,26 @@ def run_analysis(
     return stats
 
 
+def _parse_file(sf) -> ParsedFile:
+    """Parse a source file, routing to the correct language extractor."""
+    if sf.lang == "java":
+        return parse_java(sf.relative, sf.content)
+    elif sf.lang == "js":
+        return parse_js(sf.relative, sf.content)
+    elif sf.lang == "ts":
+        return parse_ts(sf.relative, sf.content)
+    elif sf.lang == "vue":
+        return parse_vue(sf.relative, sf.content)
+    else:
+        raise ValueError(f"Unknown language: {sf.lang}")
+
+
 def _parse_concurrent(
-    java_files: list,
+    source_files: list,
     progress_callback,
     total: int,
 ) -> list[ParsedFile]:
-    """Parse Java files concurrently using a process pool to avoid GIL."""
+    """Parse source files concurrently using ThreadPoolExecutor (tree-sitter releases GIL)."""
     parsed: list[ParsedFile] = []
     import threading
     lock = threading.Lock()
@@ -104,11 +132,11 @@ def _parse_concurrent(
     max_workers = min(8, os.cpu_count() or 8)
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
-            pool.submit(parse, jf.relative, jf.content): jf
-            for jf in java_files
+            pool.submit(_parse_file, sf): sf
+            for sf in source_files
         }
         for future in as_completed(futures):
-            jf = futures[future]
+            sf = futures[future]
             try:
                 pf = future.result()
                 with lock:
@@ -116,7 +144,7 @@ def _parse_concurrent(
             except Exception as e:
                 progress_callback(
                     15 + int(40 * (done + 1) / max(total, 1)),
-                    f"Skipping {jf.relative}: {e}",
+                    f"Skipping {sf.relative}: {e}",
                 )
             done += 1
             # Only report every 10% progress to reduce output noise
@@ -133,7 +161,7 @@ def _parse_concurrent(
 def _resolve_calls_parallel(
     parsed_files: list[ParsedFile],
     class_map: dict[str, str],
-) -> list[tuple[str, str, str, str, float]]:
+) -> list[tuple]:
     """Resolve call targets in parallel using ThreadPoolExecutor."""
     from ..core.resolver import resolve_calls_chunk_with_indices
 
@@ -141,7 +169,7 @@ def _resolve_calls_parallel(
     chunk_size = max(1, len(parsed_files) // max_workers)
     chunks = [parsed_files[i:i + chunk_size] for i in range(0, len(parsed_files), chunk_size)]
 
-    results: list[tuple[str, str, str, str, float]] = []
+    results: list[tuple] = []
     import threading
     lock = threading.Lock()
 
@@ -161,10 +189,11 @@ def _resolve_calls_parallel(
 def _write_to_graph_batched(
     store: GraphStore,
     parsed_files: list[ParsedFile],
-    java_files,  # list[JavaFile]
+    source_files,  # list[SourceFile]
     repo_path: Path,
-    call_relations: list[tuple[str, str, str, str, float]],
+    call_relations: list[tuple],
     class_map: dict[str, str],
+    spring_endpoint_map: dict[str, dict[str, tuple[str, str]]] | None = None,
 ) -> None:
     """Write all parsed data to the graph database using batched UNWIND."""
     _t0 = time.monotonic()
@@ -178,8 +207,8 @@ def _write_to_graph_batched(
         seen_folders: set[str] = set()
         folders: list[dict] = []
         folder_contains: list[dict] = []
-        for jf in java_files:
-            folder = str(Path(jf.relative).parent)
+        for sf in source_files:
+            folder = str(Path(sf.relative).parent)
             if folder and folder != "." and folder not in seen_folders:
                 seen_folders.add(folder)
                 folder_id = _make_folder_id(folder)
@@ -201,15 +230,15 @@ def _write_to_graph_batched(
         # 2. Write files
         file_nodes: list[dict] = []
         file_contains: list[dict] = []
-        for jf in java_files:
-            file_id = _make_file_id(jf.relative)
+        for sf in source_files:
+            file_id = _make_file_id(sf.relative)
             file_nodes.append({
                 "id": file_id,
-                "name": Path(jf.relative).name,
-                "filePath": jf.relative,
-                "content": jf.text[:10000],
+                "name": Path(sf.relative).name,
+                "filePath": sf.relative,
+                "content": sf.text[:10000],
             })
-            folder = str(Path(jf.relative).parent)
+            folder = str(Path(sf.relative).parent)
             if folder and folder != ".":
                 folder_id = _make_folder_id(folder)
                 file_contains.append({
@@ -339,7 +368,7 @@ def _write_to_graph_batched(
                     method.file_path,
                     method.start_line,
                 )
-                method_defines.append({
+                method_data: dict = {
                     "id": method_id,
                     "name": method.name,
                     "className": method.class_name or "",
@@ -353,7 +382,19 @@ def _write_to_graph_batched(
                     "isConstructor": method.is_constructor,
                     "content": method.content[:5000],
                     "from_id": file_id,
-                })
+                }
+                # Add HTTP endpoint info for Spring controller methods
+                file_endpoints = spring_endpoint_map.get(pf.file_path, {}) if spring_endpoint_map else {}
+                if method.name in file_endpoints:
+                    http_method, http_path = file_endpoints[method.name]
+                    method_data["httpMethod"] = http_method
+                    method_data["httpPath"] = http_path
+                else:
+                    # Ensure all rows have the same keys for CSV COPY
+                    method_data["httpMethod"] = ""
+                    method_data["httpPath"] = ""
+                    method_data["httpParams"] = ""
+                method_defines.append(method_data)
 
             # 5. Write fields — build directly, no lookup needed
             for field in pf.fields:
@@ -542,13 +583,60 @@ def _write_to_graph_batched(
             bw.insert_relations("Field", "Annotation", has_annotations_field, "HAS_ANNOTATION", 1.0, "field has annotation")
         _step("Annotations done")
 
+        # Insert TypeAlias nodes (TS only)
+        typealias_defines: list[dict] = []
+        for pf in parsed_files:
+            if not pf.type_aliases:
+                continue
+            file_id = _make_file_id(pf.file_path)
+            for ta in pf.type_aliases:
+                tid = _make_type_alias_id(ta.name, pf.file_path, ta.start_line)
+                typealias_defines.append({
+                    "id": tid,
+                    "name": ta.name,
+                    "filePath": pf.file_path,
+                    "startLine": ta.start_line,
+                    "endLine": ta.end_line,
+                    "content": ta.content[:5000] if ta.content else "",
+                    "from_id": file_id,
+                })
+        bw.insert_nodes_with_defines("TypeAlias", typealias_defines, "DEFINES")
+
+        # Insert Enum nodes (TS only)
+        enum_defines: list[dict] = []
+        for pf in parsed_files:
+            if not pf.enums:
+                continue
+            file_id = _make_file_id(pf.file_path)
+            for en in pf.enums:
+                eid = _make_enum_id(en.name, pf.file_path, en.start_line)
+                enum_defines.append({
+                    "id": eid,
+                    "name": en.name,
+                    "filePath": pf.file_path,
+                    "startLine": en.start_line,
+                    "endLine": en.end_line,
+                    "isConst": en.is_const,
+                    "content": en.content[:5000] if en.content else "",
+                    "from_id": file_id,
+                })
+        bw.insert_nodes_with_defines("Enum", enum_defines, "DEFINES")
+        _step("TypeAlias and Enum done")
+
         # 6. Write CALLS relations (deduplicate by caller_id + target_id)
         _step("Starting CALLS relations...")
 
         # Caller can be Method or Constructor; target can be Method, Constructor, or Class
         calls_by_tables: dict[tuple[str, str], list[dict]] = {}
         seen_calls: set[tuple[str, str]] = set()
-        for caller_name, caller_file, target_name, target_file, confidence in call_relations:
+        for item in call_relations:
+            # Handle both 5-tuple (Java: caller, file, target, file, confidence)
+            # and 8-tuple (JS/TS: + http_method, http_path, http_params)
+            caller_name, caller_file, target_name, target_file, confidence = item[:5]
+            http_method = item[5] if len(item) > 5 else None
+            http_path = item[6] if len(item) > 6 else None
+            http_params = item[7] if len(item) > 7 else None
+
             # Resolve caller ID: try method first, then constructor
             caller_id = method_ids.get((caller_name, caller_file))
             caller_table = "Method"
@@ -573,16 +661,89 @@ def _write_to_graph_batched(
             pair = (caller_id, target_id)
             if pair not in seen_calls:
                 seen_calls.add(pair)
-                calls_by_tables.setdefault((caller_table, target_table), []).append({
+                rel_data: dict = {
                     "from_id": caller_id,
                     "to_id": target_id,
                     "confidence": confidence,
-                })
+                }
+                if http_method:
+                    rel_data["httpMethod"] = http_method
+                if http_path:
+                    rel_data["httpPath"] = http_path
+                if http_params:
+                    rel_data["httpParams"] = http_params
+                calls_by_tables.setdefault((caller_table, target_table), []).append(rel_data)
         for (from_table, to_table), data in calls_by_tables.items():
+            # Always include all HTTP columns since schema has them
             store.bulk_copy_relations(
                 from_table, to_table, data, "CALLS", "method invocation",
+                extra_columns=["httpMethod", "httpPath", "httpParams"],
             )
         _step("CALLS done")
+
+        # 6b. Build USES_ENDPOINT relations: frontend methods → backend controller methods
+        # by matching HTTP method + path from JS/TS CALLS to Spring endpoints
+        _step("Building USES_ENDPOINT relations...")
+        uses_endpoint_rels: list[dict] = []
+        seen_uses: set[tuple[str, str]] = set()
+
+        # Build reverse index: (http_method, http_path) → backend method_id
+        backend_endpoint_lookup: dict[tuple[str, str], str] = {}
+        if spring_endpoint_map:
+            for file_path, endpoints in spring_endpoint_map.items():
+                for method_name, (http_method, http_path) in endpoints.items():
+                    key = (http_method, http_path)
+                    mid = method_ids.get((method_name, file_path))
+                    if mid:
+                        backend_endpoint_lookup[key] = mid
+
+        # Scan JS/TS CALLS relations for HTTP endpoint info
+        for item in call_relations:
+            if len(item) < 6:
+                continue
+            caller, caller_file, target, target_file, confidence = item[:5]
+            http_method = item[5] if len(item) > 5 else None
+            http_path = item[6] if len(item) > 6 else None
+            http_params = item[7] if len(item) > 7 else None
+
+            if not http_method or not http_path:
+                continue
+
+            # Only process frontend (JS/TS) files
+            if not _is_js_ts_file(caller_file):
+                continue
+
+            # Look up matching backend method
+            backend_id = backend_endpoint_lookup.get((http_method, http_path))
+            if not backend_id:
+                continue
+
+            # Get caller method ID
+            caller_id = method_ids.get((caller, caller_file))
+            if not caller_id:
+                continue
+
+            pair = (caller_id, backend_id)
+            if pair not in seen_uses:
+                seen_uses.add(pair)
+                rel_data: dict = {
+                    "from_id": caller_id,
+                    "to_id": backend_id,
+                    "confidence": 0.85,
+                }
+                if http_params:
+                    rel_data["httpParams"] = http_params
+                uses_endpoint_rels.append(rel_data)
+
+        if uses_endpoint_rels:
+            has_params = any("httpParams" in r for r in uses_endpoint_rels)
+            extra = ["httpMethod", "httpPath"] + (["httpParams"] if has_params else [])
+            store.bulk_copy_relations(
+                "Method", "Method", uses_endpoint_rels, "USES_ENDPOINT",
+                "frontend → backend endpoint match",
+                extra_columns=extra,
+            )
+        _step(f"USES_ENDPOINT done ({len(uses_endpoint_rels)} relations)")
 
         # 7. Write ACCESSES relations (Method/Constructor → Field)
         accesses_data: list[dict] = []
@@ -779,6 +940,11 @@ def _chunked(lst: list, size: int) -> list:
     return [lst[i:i + size] for i in range(0, len(lst), size)]
 
 
+def _is_js_ts_file(file_path: str) -> bool:
+    """Check if a file path is JS/TS/Vue based on extension."""
+    return file_path.endswith((".js", ".jsx", ".ts", ".tsx", ".vue"))
+
+
 def _compute_stats(parsed_files: list[ParsedFile]) -> dict:
     """Compute summary statistics."""
     total_classes = sum(len(pf.classes) for pf in parsed_files)
@@ -844,3 +1010,131 @@ def _make_variable_id(name: str, file_path: str, line: int = 0) -> str:
 def _make_annotation_id(ann_name: str, target_name: str, file_path: str, line: int = 0, counter: int = 0) -> str:
     safe_path = file_path.replace("/", "_").replace(".", "_")
     return f"Annotation_{safe_path}_{ann_name}_{target_name}_{line}_{counter}"
+
+
+def _make_type_alias_id(name: str, file_path: str, start_line: int = 0) -> str:
+    safe_path = file_path.replace("/", "_").replace(".", "_")
+    return f"TypeAlias_{safe_path}_{name}_{start_line}"
+
+
+def _make_enum_id(name: str, file_path: str, start_line: int = 0) -> str:
+    safe_path = file_path.replace("/", "_").replace(".", "_")
+    return f"Enum_{safe_path}_{name}_{start_line}"
+
+
+def _build_spring_endpoint_map(
+    parsed_files: list[ParsedFile],
+) -> dict[str, dict[str, tuple[str, str]]]:
+    """Build (file_path, method_name) → (http_method, http_path) from Spring annotations.
+
+    Extracts HTTP method from annotation name:
+    - @GetMapping → GET
+    - @PostMapping → POST
+    - @PutMapping → PUT
+    - @DeleteMapping → DELETE
+    - @PatchMapping → PATCH
+    - @RequestMapping → use "method" attribute if present, default to GET
+
+    Extracts path from annotation "path" or "value" attribute.
+    Also combines with class-level @RequestMapping prefix.
+
+    Returns:
+        {file_path: {method_name: (http_method, http_path), ...}, ...}
+    """
+    # Annotation name → HTTP method mapping
+    annotation_method_map = {
+        "GetMapping": "GET",
+        "PostMapping": "POST",
+        "PutMapping": "PUT",
+        "DeleteMapping": "DELETE",
+        "PatchMapping": "PATCH",
+    }
+
+    result: dict[str, dict[str, tuple[str, str]]] = {}
+
+    # First pass: find class-level @RequestMapping paths
+    class_prefix: dict[str, str] = {}  # class_name → prefix_path
+    for pf in parsed_files:
+        for ann in pf.annotations:
+            if ann.name == "RequestMapping" and ann.target_type == "class":
+                path = ann.attributes.get("path", "") or ann.attributes.get("value", "")
+                if path:
+                    class_prefix[ann.target_name] = path
+
+    # Build method_name → class_name map per file (to link method annotations to their class)
+    method_class_map: dict[str, dict[str, str]] = {}  # file_path → {method_name → class_name}
+    for pf in parsed_files:
+        for method in pf.methods:
+            if method.class_name:
+                method_class_map.setdefault(pf.file_path, {})[method.name] = method.class_name
+
+    # Second pass: find method-level HTTP mapping annotations
+    for pf in parsed_files:
+        endpoint_map: dict[str, tuple[str, str]] = {}
+        file_method_class = method_class_map.get(pf.file_path, {})
+
+        for ann in pf.annotations:
+            # Skip class-level annotations — they only contribute prefixes
+            if ann.target_type == "class":
+                continue
+
+            http_method = annotation_method_map.get(ann.name)
+            if not http_method and ann.name == "RequestMapping":
+                # @RequestMapping can specify method
+                http_method = "GET"  # default
+                method_attr = ann.attributes.get("method", "")
+                if method_attr:
+                    # Extract HTTP method from e.g. "RequestMethod.POST"
+                    if "." in method_attr:
+                        method_attr = method_attr.split(".")[-1]
+                    if method_attr in ("GET", "POST", "PUT", "DELETE", "PATCH"):
+                        http_method = method_attr
+
+            if http_method:
+                path = ann.attributes.get("path", "") or ann.attributes.get("value", "")
+                if path:
+                    # Combine with class-level prefix
+                    full_path = path
+                    # Look up the class name for this method annotation
+                    class_name = file_method_class.get(ann.target_name)
+                    if class_name and class_name in class_prefix:
+                        prefix = class_prefix[class_name]
+                        full_path = prefix.rstrip("/") + "/" + path.lstrip("/")
+
+                    endpoint_map[ann.target_name] = (http_method, full_path)
+
+        if endpoint_map:
+            result[pf.file_path] = endpoint_map
+
+    return result
+
+
+def _enrich_java_calls(
+    call_relations: list[tuple],
+    spring_endpoint_map: dict[str, dict[str, tuple[str, str]]],
+) -> list[tuple]:
+    """Enrich Java CALLS relations with Spring endpoint info.
+
+    For calls targeting a controller method with HTTP endpoint info,
+    convert the 5-tuple to an 8-tuple with http_method, http_path, http_params.
+    """
+    enriched: list[tuple] = []
+    for item in call_relations:
+        if len(item) == 8:
+            # Already has HTTP info (JS/TS)
+            enriched.append(item)
+            continue
+
+        # 5-tuple Java call: (caller, caller_file, target, target_file, confidence)
+        caller, caller_file, target, target_file, confidence = item
+
+        # Check if the target method is a Spring controller endpoint
+        endpoint_map = spring_endpoint_map.get(target_file, {})
+        if target in endpoint_map:
+            http_method, http_path = endpoint_map[target]
+            # Convert to 8-tuple
+            enriched.append((caller, caller_file, target, target_file, confidence, http_method, http_path, None))
+        else:
+            enriched.append(item)
+
+    return enriched

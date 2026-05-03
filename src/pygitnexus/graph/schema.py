@@ -50,6 +50,9 @@ NODE_TABLES = [
         isPublic BOOLEAN,
         isConstructor BOOLEAN,
         content STRING,
+        httpMethod STRING,
+        httpPath STRING,
+        httpParams STRING,
         PRIMARY KEY (id)
     )""",
     """CREATE NODE TABLE Field (
@@ -97,6 +100,25 @@ NODE_TABLES = [
         attributes STRING,
         PRIMARY KEY (id)
     )""",
+    """CREATE NODE TABLE TypeAlias (
+        id STRING,
+        name STRING,
+        filePath STRING,
+        startLine INT64,
+        endLine INT64,
+        content STRING,
+        PRIMARY KEY (id)
+    )""",
+    """CREATE NODE TABLE Enum (
+        id STRING,
+        name STRING,
+        filePath STRING,
+        startLine INT64,
+        endLine INT64,
+        isConst BOOLEAN,
+        content STRING,
+        PRIMARY KEY (id)
+    )""",
 ]
 
 # Relation types
@@ -104,7 +126,7 @@ REL_TYPES = [
     "CONTAINS", "DEFINES", "CALLS", "IMPORTS",
     "EXTENDS", "IMPLEMENTS", "HAS_METHOD", "HAS_PROPERTY",
     "HAS_CONSTRUCTOR", "HAS_VARIABLE", "HAS_ANNOTATION",
-    "ACCESSES",
+    "ACCESSES", "USES_ENDPOINT",
 ]
 
 # Single CodeRelation table with type property
@@ -121,6 +143,8 @@ CREATE REL TABLE CodeRelation (
     FROM File TO Constructor,
     FROM File TO Variable,
     FROM File TO Annotation,
+    FROM File TO TypeAlias,
+    FROM File TO Enum,
     FROM Class TO Method,
     FROM Class TO Field,
     FROM Class TO Constructor,
@@ -145,7 +169,10 @@ CREATE REL TABLE CodeRelation (
     FROM Interface TO Interface,
     type STRING,
     confidence DOUBLE,
-    reason STRING
+    reason STRING,
+    httpMethod STRING,
+    httpPath STRING,
+    httpParams STRING
 )
 """
 
