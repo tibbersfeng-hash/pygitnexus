@@ -325,37 +325,42 @@ class GraphStore:
             {"name": name},
         )
 
-        # Build hierarchical callers: USES_ENDPOINT pages as parents, CALLS callers as children
-        # Actual flow: HTML page → USES_ENDPOINT → Controller → CALLS → Impl (target)
+        # Build hierarchical callers: Controller as parent, page as child
+        # Rendering order: Controller (closer to target) → page (further out)
         page_map: dict[str, dict] = {}
 
-        # Attach two-hop USES_ENDPOINT pages as top-level, with Controller as child
+        # Attach two-hop USES_ENDPOINT: Controller as parent, page as child
         for fc in ep_two_hop:
-            page_key = fc["caller"]  # HTML page name
             ctrl_key = f"{fc['ctrlClass']}.{fc['ctrlName']}"
-            if page_key not in page_map:
-                page_map[page_key] = {
-                    "caller": fc["caller"],
-                    "callerClass": fc.get("callerClass", ""),
+            page_key = fc["caller"]
+            if ctrl_key not in page_map:
+                page_map[ctrl_key] = {
+                    "caller": fc["ctrlName"],
+                    "callerClass": fc.get("ctrlClass", ""),
                     "confidence": fc.get("confidence"),
-                    "relType": "USES_ENDPOINT",
+                    "relType": "CALLS (via Interface)",
                     "children": [],
                 }
-            # Add Controller as child if not already present
-            if not any(ch.get("callerClass") == fc["ctrlClass"] and ch.get("caller") == fc["ctrlName"] for ch in page_map[page_key]["children"]):
-                page_map[page_key]["children"].append({
-                    "caller": fc["ctrlName"],
-                    "callerClass": fc["ctrlClass"],
+            # Add page as child if not already present
+            if not any(ch.get("caller") == fc["caller"] for ch in page_map[ctrl_key]["children"]):
+                page_map[ctrl_key]["children"].append({
+                    "caller": fc["caller"],
+                    "callerClass": fc.get("pageClass", ""),
                     "confidence": None,
-                    "relType": "CALLS (via Interface)",
+                    "relType": "USES_ENDPOINT",
                     "children": [],
                 })
 
-        # Attach direct USES_ENDPOINT callers (HTML → Controller target)
+        # Attach direct USES_ENDPOINT callers (HTML → target) - skip if page already a child
         if frontend_callers:
             for fc in frontend_callers:
                 page_key = fc["caller"]
-                if page_key not in page_map:
+                # Skip if this page is already a child of any caller entry
+                already_child = any(
+                    any(ch.get("caller") == fc["caller"] for ch in pm.get("children", []))
+                    for pm in page_map.values()
+                )
+                if not already_child and page_key not in page_map:
                     page_map[page_key] = {
                         "caller": fc["caller"],
                         "callerClass": fc.get("callerClass", ""),

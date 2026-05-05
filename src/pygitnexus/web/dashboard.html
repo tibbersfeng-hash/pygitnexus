@@ -4,10 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PyGitNexus Dashboard</title>
-<script src="/static/d3.min.js"></script>
-<script src="/static/markmap-lib.min.js"></script>
-<script src="/static/markmap-view.min.js"></script>
-<script src="/static/markmap-toolbar.min.js"></script>
+<script src="https://cdn.bootcdn.net/ajax/libs/echarts/5.5.0/echarts.min.js"></script>
 <style>
 :root {
   --bg: #0f1117;
@@ -118,21 +115,16 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .detail-group h4 { font-size: 13px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
 .detail-group .item { padding: 6px 10px; font-size: 13px; border-left: 2px solid var(--border); margin-left: 8px; }
 
-/* Mindmap */
+/* Mindmap (Dagre-D3) */
 .mindmap-container { margin-top: 8px; margin-bottom: 20px; background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; }
 .mindmap-container .mindmap-title-bar { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--border); }
 .mindmap-container .mindmap-title { font-size: 14px; font-weight: 600; color: var(--accent); text-transform: uppercase; letter-spacing: 0.5px; }
 .mindmap-fullscreen-btn { background: var(--surface); color: var(--text2); border: 1px solid var(--border); padding: 4px 10px; border-radius: 6px; font-size: 12px; cursor: pointer; }
 .mindmap-fullscreen-btn:hover { color: var(--accent); border-color: var(--accent); }
-.mindmap-canvas { width: 100%; max-height: 60vh; position: relative; overflow: auto; cursor: grab; }
-.mindmap-canvas.dragging { cursor: grabbing; }
-.mindmap-canvas svg { display: block; }
-.mindmap-canvas .mindmap-node:hover rect { stroke-opacity: 1 !important; fill: var(--surface2); }
-.mindmap-canvas .mm-panel-label {
-  position: absolute; top: 8px; font-size: 11px; color: var(--text2);
-  text-transform: uppercase; letter-spacing: 1px; padding: 2px 8px;
-  border-radius: 4px; pointer-events: none; z-index: 5;
-}
+.mindmap-canvas { width: 100%; height: 500px; max-height: 65vh; position: relative; overflow: hidden; }
+.mindmap-legend { display: flex; gap: 16px; justify-content: center; padding: 8px 16px; border-top: 1px solid var(--border); }
+.mindmap-legend-item { display: flex; align-items: center; gap: 5px; font-size: 0.75rem; color: var(--text2); }
+.mindmap-legend-dot { width: 8px; height: 8px; border-radius: 2px; }
 
 /* Mindmap fullscreen overlay */
 .mindmap-overlay {
@@ -151,7 +143,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   border-radius: 6px; font-size: 13px; cursor: pointer; font-weight: 500;
 }
 .mindmap-overlay .overlay-close:hover { background: var(--accent2); }
-.mindmap-overlay .overlay-body { flex: 1; overflow: auto; padding: 20px; }
+.mindmap-overlay .overlay-body { flex: 1; overflow: hidden; position: relative; }
 
 /* Cypher */
 .cypher-input { width: 100%; margin-bottom: 12px; }
@@ -1095,7 +1087,7 @@ async function showSymbolDetail(fullName, shortName) {
   }
 }
 
-// ── Mindmap Bidirectional Tree Renderer ──
+// ── Mindmap: ECharts Tree Renderer ──
 function renderMindmapPanels(uid) {
   const data = window._mindmapTrees?.[uid];
   if (!data) return;
@@ -1103,228 +1095,143 @@ function renderMindmapPanels(uid) {
   const container = document.getElementById(uid);
   if (!container) return;
 
-  const UP_COLOR = '#f472b6';
-  const DOWN_COLOR = '#34d399';
-  const ROOT_COLOR = '#a78bfa';
-
-  // Compute layout
-  const NODE_H = 28;
-  const NODE_GAP = 6;
-  const H_SPACING = 220;
-  const PADDING_X = 60;
-  const PADDING_Y = 30;
-
-  function subtreeHeight(nodes) {
-    if (!nodes || !nodes.length) return NODE_H;
-    let total = 0;
-    nodes.forEach((n, i) => {
-      const childH = subtreeHeight(n.children || []);
-      total += Math.max(childH, NODE_H);
-      if (i < nodes.length - 1) total += NODE_GAP;
-    });
-    return total;
+  // Build nested tree for downstream
+  function buildTree(items) {
+    if (!items || !items.length) return [];
+    return items.map(item => ({
+      name: item.name,
+      itemStyle: {
+        color: item.via && item.via.includes('SQL') ? '#a78bfa' : '#10b981',
+        borderColor: item.via && item.via.includes('SQL') ? '#c4b5fd' : '#34d399',
+      },
+      children: item.children && item.children.length ? buildTree(item.children) : [],
+    }));
   }
 
-  // Assign positions recursively
-  const upNodes = data.upstream || [];
-  const downNodes = data.downstream || [];
-  const totalH = Math.max(subtreeHeight(upNodes), subtreeHeight(downNodes), NODE_H) + PADDING_Y * 2;
-  const canvasH = Math.max(totalH, 300);
-  const centerY = canvasH / 2;
-
-  const nodes = []; // { name, x, y, depth, side }
-  const links = []; // { fromX, fromY, toX, toY, side }
-
-  // Root at center
-  const rootX = PADDING_X + (upNodes.length > 0 ? H_SPACING : 0);
-  nodes.push({ name: data.root, x: rootX, y: centerY, depth: 0, side: 'root' });
-
-  // Recursive layout for a list of nodes at a given position
-  function layoutNodes(nList, parentX, parentY, side, startX, depth) {
-    let y = startX;
-    nList.forEach(n => {
-      const childH = subtreeHeight(n.children || []);
-      const nH = Math.max(childH, NODE_H);
-      const nodeY = y + nH / 2;
-      // Top-level nodes go outward from root; nested children go inward (closer to root)
-      const outward = side === 'up' ? -H_SPACING : H_SPACING;
-      const nodeX = parentX + (depth <= 1 ? outward : -outward);
-      nodes.push({ name: n.name, x: nodeX, y: nodeY, depth: depth || 1, side });
-      links.push({ fromX: parentX, fromY: parentY, toX: nodeX, toY: nodeY, side });
-      if (n.children && n.children.length > 0) {
-        layoutNodes(n.children, nodeX, nodeY, side, y, (depth || 1) + 1);
+  // Build upstream tree (reverse: Controller should be closer to root, page at outer end)
+  function buildUpstreamTree(items) {
+    if (!items || !items.length) return [];
+    // Reverse the chain so Controller is child of '上游调用者', page is the leaf
+    function reverseChain(item) {
+      if (!item.children || !item.children.length) return [item];
+      const leafItems = item.children.map(reverseChain);
+      if (leafItems.length === 1) {
+        return leafItems[0].map(ch => ({
+          ...ch,
+          children: [{ name: item.name, itemStyle: item.itemStyle, label: item.label, children: ch.children }],
+        }));
       }
-      y += nH + NODE_GAP;
-    });
+      return [];
+    }
+    const result = [];
+    for (const item of items) {
+      if (!item.children || !item.children.length) {
+        result.push({ name: item.name, itemStyle: item.itemStyle, label: item.label, children: [] });
+      } else {
+        for (const child of item.children) {
+          result.push({
+            name: child.name,
+            itemStyle: child.itemStyle || { color: '#0ea5e9', borderColor: '#38bdf8' },
+            label: child.label || { color: '#7dd3fc' },
+            children: [{ name: item.name, itemStyle: item.itemStyle, label: item.label, children: [] }],
+          });
+        }
+      }
+    }
+    return result.map(r => ({
+      name: r.name,
+      itemStyle: r.itemStyle,
+      label: r.label,
+      children: r.children && r.children.length ? r.children : [],
+    }));
   }
 
-  if (upNodes.length > 0) {
-    const upTotal = subtreeHeight(upNodes);
-    const upStart = centerY - upTotal / 2;
-    layoutNodes(upNodes, rootX, centerY, 'up', upStart, 1);
-  }
+  const treeData = {
+    name: data.root,
+    symbolSize: 16,
+    itemStyle: { color: '#6366f1', borderColor: '#818cf8' },
+    label: { fontSize: 14, fontWeight: 'bold', color: '#fff' },
+    children: [
+      {
+        name: '\u4e0a\u6e38\u8c03\u7528\u8005',
+        symbolSize: 10,
+        itemStyle: { color: '#0ea5e9' },
+        label: { color: '#0ea5e9', fontSize: 12, fontWeight: 'bold' },
+        children: buildUpstreamTree(data.upstream || []),
+      },
+      {
+        name: '\u4e0b\u6e38\u88ab\u8c03\u7528',
+        symbolSize: 10,
+        itemStyle: { color: '#10b981' },
+        label: { color: '#10b981', fontSize: 12, fontWeight: 'bold' },
+        children: buildTree(data.downstream || []),
+      }
+    ],
+  };
 
-  if (downNodes.length > 0) {
-    const downTotal = subtreeHeight(downNodes);
-    const downStart = centerY - downTotal / 2;
-    layoutNodes(downNodes, rootX, centerY, 'down', downStart, 1);
-  }
-
-  const maxX = Math.max(...nodes.map(n => n.x));
-  const canvasW = Math.max(maxX + PADDING_X + 40, 600);
-
-  // ── SVG wrapper with pan/zoom ──
+  // Clear previous content
   container.innerHTML = '';
-  // Container handles scrolling via max-height + overflow: auto
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  svg.setAttribute('width', canvasW);
-  svg.setAttribute('height', canvasH);
-  svg.setAttribute('viewBox', `0 0 ${canvasW} ${canvasH}`);
-  svg.style.display = 'block';
-  // Inner group that gets pan/zoom transforms
-  const content = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-  content.setAttribute('class', 'mindmap-content');
-  svg.appendChild(content);
 
-  // Pan state
-  let isDragging = false;
-  let dragStartX = 0, dragStartY = 0;
-  let dragScrollLeft = 0, dragScrollTop = 0;
+  // Create/reuse ECharts instance
+  let chart = container._echartsChart;
+  if (!chart) {
+    chart = echarts.init(container);
+    container._echartsChart = chart;
+  }
 
-  container.addEventListener('mousedown', (e) => {
-    // Only drag on empty area, not on nodes
-    if (e.target.closest('.mindmap-node')) return;
-    isDragging = true;
-    container.classList.add('dragging');
-    dragStartX = e.clientX;
-    dragStartY = e.clientY;
-    dragScrollLeft = container.scrollLeft;
-    dragScrollTop = container.scrollTop;
-    e.preventDefault();
-  });
+  // Handle resize
+  if (container._resizeHandler) {
+    window.removeEventListener('resize', container._resizeHandler);
+  }
+  container._resizeHandler = () => chart.resize();
+  window.addEventListener('resize', container._resizeHandler);
 
-  document.addEventListener('mousemove', (e) => {
-    if (!isDragging) return;
-    const dx = e.clientX - dragStartX;
-    const dy = e.clientY - dragStartY;
-    container.scrollLeft = dragScrollLeft - dx;
-    container.scrollTop = dragScrollTop - dy;
-  });
+  const option = {
+    backgroundColor: 'transparent',
+    tooltip: { trigger: 'item', triggerOn: 'mousemove', formatter: (p) => `<b>${p.name}</b>` },
+    series: [{
+      type: 'tree',
+      data: [treeData],
+      orient: 'LR',
+      top: '5%', left: '5%', bottom: '5%', right: '10%',
+      symbolSize: 8,
+      initialTreeDepth: 3,
+      expandAndCollapse: true,
+      roam: true,
+      scaleLimit: { min: 0.2, max: 4 },
+      itemStyle: { color: '#6366f1', borderColor: '#818cf8' },
+      lineStyle: { color: '#374151', width: 1.5, curveness: 0.5 },
+      label: { position: 'left', verticalAlign: 'middle', align: 'right', fontSize: 11, color: '#cbd5e1' },
+      leaves: { label: { position: 'right', verticalAlign: 'middle', align: 'left' } },
+      emphasis: { focus: 'descendant', label: { color: '#fff' } },
+    }]
+  };
 
-  document.addEventListener('mouseup', () => {
-    if (isDragging) {
-      isDragging = false;
-      container.classList.remove('dragging');
+  chart.setOption(option, true);
+  setTimeout(() => chart.resize(), 80);
+
+  // Click handler for navigating to symbol detail
+  chart.off('click');
+  chart.on('click', (params) => {
+    if (params.name && params.name !== data.root &&
+        params.name !== '\u4e0a\u6e38\u8c03\u7528\u8005' && params.name !== '\u4e0b\u6e38\u88ab\u8c03\u7528') {
+      showSymbolDetail(params.name, params.name.split('.').pop());
     }
   });
 
-  // Wheel zoom
-  container.addEventListener('wheel', (e) => {
-    e.preventDefault();
-    const zoomFactor = e.deltaY > 0 ? 0.95 : 1.05;
-    const vb = svg.getAttribute('viewBox').split(' ').map(Number);
-    const [vx, vy, vw, vh] = vb;
-    const newW = Math.max(100, Math.min(vw * 3, vw / zoomFactor));
-    const newH = Math.max(100, Math.min(vh * 3, vh / zoomFactor));
-    // Zoom toward mouse position within container
-    const rect = container.getBoundingClientRect();
-    const mx = (e.clientX - rect.left) / rect.width;
-    const my = (e.clientY - rect.top) / rect.height;
-    const nx = vx + mx * (vw - newW);
-    const ny = vy + my * (vh - newH);
-    svg.setAttribute('viewBox', `${nx} ${ny} ${newW} ${newH}`);
-  }, { passive: false });
-
-  // Defs
-  const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
-  const filter = document.createElementNS('http://www.w3.org/2000/svg', 'filter');
-  filter.setAttribute('id', 'nodeGlow-' + uid);
-  const blur = document.createElementNS('http://www.w3.org/2000/svg', 'feGaussianBlur');
-  blur.setAttribute('stdDeviation', '3');
-  blur.setAttribute('result', 'coloredBlur');
-  filter.appendChild(blur);
-  const merge = document.createElementNS('http://www.w3.org/2000/svg', 'feMerge');
-  const mn1 = document.createElementNS('http://www.w3.org/2000/svg', 'feMergeNode');
-  mn1.setAttribute('in', 'coloredBlur');
-  merge.appendChild(mn1);
-  const mn2 = document.createElementNS('http://www.w3.org/2000/svg', 'feMergeNode');
-  mn2.setAttribute('in', 'SourceGraphic');
-  merge.appendChild(mn2);
-  filter.appendChild(merge);
-  defs.appendChild(filter);
-  svg.appendChild(defs);
-
-  // Links layer
-  const linksG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-  linksG.setAttribute('class', 'links');
-  links.forEach(l => {
-    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    const color = l.side === 'up' ? UP_COLOR : DOWN_COLOR;
-    const midX = l.fromX + (l.toX - l.fromX) * 0.4;
-    path.setAttribute('d', `M${l.fromX},${l.fromY} C${midX},${l.fromY} ${midX},${l.toY} ${l.toX},${l.toY}`);
-    path.setAttribute('stroke', color);
-    path.setAttribute('stroke-width', '2.5');
-    path.setAttribute('fill', 'none');
-    path.setAttribute('stroke-opacity', '0.7');
-    linksG.appendChild(path);
-  });
-  content.appendChild(linksG);
-
-  // Nodes layer
-  const nodesG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-  nodesG.setAttribute('class', 'nodes');
-
-  nodes.forEach(n => {
-    const color = n.side === 'up' ? UP_COLOR : n.side === 'down' ? DOWN_COLOR : ROOT_COLOR;
-    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-    g.setAttribute('class', 'mindmap-node');
-    g.setAttribute('cursor', n.side !== 'root' ? 'pointer' : 'default');
-    g.setAttribute('transform', `translate(${n.x}, ${n.y})`);
-
-    const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-    const nodeW = Math.max(n.name.length * 8.5 + 24, 80);
-    rect.setAttribute('x', -nodeW / 2);
-    rect.setAttribute('y', -NODE_H / 2);
-    rect.setAttribute('width', nodeW);
-    rect.setAttribute('height', NODE_H);
-    rect.setAttribute('rx', '6');
-    rect.setAttribute('fill', '#1a1d27');
-    rect.setAttribute('stroke', color);
-    rect.setAttribute('stroke-width', '1.5');
-    rect.setAttribute('stroke-opacity', '0.7');
-    g.appendChild(rect);
-
-    const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-    circle.setAttribute('cx', -nodeW / 2 - 5);
-    circle.setAttribute('cy', '0');
-    circle.setAttribute('r', '4');
-    circle.setAttribute('fill', color);
-    circle.setAttribute('opacity', '0.9');
-    g.appendChild(circle);
-
-    const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-    text.setAttribute('text-anchor', 'middle');
-    text.setAttribute('dy', '0.35em');
-    text.setAttribute('fill', '#e2e8f0');
-    text.setAttribute('font-family', "'SF Mono', 'Fira Code', 'Consolas', monospace");
-    text.setAttribute('font-size', '12.5');
-    text.setAttribute('font-weight', '500');
-    text.textContent = n.name;
-    g.appendChild(text);
-
-    if (n.side !== 'root') {
-      g.addEventListener('click', (e) => {
-        e.stopPropagation();
-        showSymbolDetail(n.name, n.name.split('.').pop());
-      });
-      g.style.cursor = 'pointer';
-    }
-
-    nodesG.appendChild(g);
-  });
-  content.appendChild(nodesG);
-
-  container.appendChild(svg);
+  // Legend
+  const existingLegend = container.parentElement.querySelector('.mindmap-legend');
+  if (!existingLegend) {
+    const legend = document.createElement('div');
+    legend.className = 'mindmap-legend';
+    legend.innerHTML = `
+      <span class="mindmap-legend-item"><span class="mindmap-legend-dot" style="background:#6366f1"></span>\u76ee\u6807\u65b9\u6cd5</span>
+      <span class="mindmap-legend-item"><span class="mindmap-legend-dot" style="background:#0ea5e9"></span>\u4e0a\u6e38\u8c03\u7528\u8005</span>
+      <span class="mindmap-legend-item"><span class="mindmap-legend-dot" style="background:#10b981"></span>\u4e0b\u6e38\u88ab\u8c03\u7528</span>
+      <span class="mindmap-legend-item"><span class="mindmap-legend-dot" style="background:#a78bfa"></span>SQL / \u8868</span>
+    `;
+    container.parentElement.appendChild(legend);
+  }
 }
 
 // ── Mindmap Fullscreen ──

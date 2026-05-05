@@ -61,6 +61,7 @@ _TASK_DETECTORS: list[dict] = [
 
 # HTML template is read at module load time
 _DASHBOARD_HTML = (Path(__file__).parent / "dashboard.html").read_text()
+_VIZ_DEMO_HTML = (Path(__file__).parent / "viz_demo.html").read_text()
 
 
 def _ok(data: Any) -> JSONResponse:
@@ -83,6 +84,10 @@ def _get_repo_param(request: Request) -> str | None:
 
 async def dashboard(request: Request) -> HTMLResponse:
     return HTMLResponse(_DASHBOARD_HTML)
+
+
+async def viz_demo(request: Request) -> HTMLResponse:
+    return HTMLResponse(_VIZ_DEMO_HTML)
 
 
 async def api_list_repos(request: Request) -> JSONResponse:
@@ -1288,7 +1293,7 @@ async def api_mindmap(request: Request) -> JSONResponse:
         root_label = f"{class_name}.{method_name}"
 
         # Upstream: USES_ENDPOINT pages as top-level, Controller as child
-        # Actual flow: HTML page → USES_ENDPOINT → Controller → CALLS → Impl (target)
+        # Actual flow: HTML page → USES_ENDPOINT → Controller → CALLS → target
         upstream = []
         if impl_iface_short:
             callers = store.query(
@@ -1297,8 +1302,7 @@ async def api_mindmap(request: Request) -> JSONResponse:
                 "RETURN caller.name AS callerName, caller.className AS callerClass LIMIT 20",
                 {"iface": impl_iface_short, "method": method_name},
             )
-            # Also include frontend pages via USES_ENDPOINT:
-            # HTML pages USES_ENDPOINT → Controller → CALLS → Interface → IMPLEMENTS → Impl (target)
+            # Two-hop: HTML pages → USES_ENDPOINT → Controller → CALLS → Interface
             ep_callers = store.query(
                 "MATCH (page:Method)-[r1:CodeRelation {type: 'USES_ENDPOINT'}]->(ctrl:Method)-[r2:CodeRelation {type: 'CALLS'}]->(iface:Method) "
                 "WHERE iface.className = $iface AND iface.name = $method "
@@ -1325,7 +1329,6 @@ async def api_mindmap(request: Request) -> JSONResponse:
             for c in callers:
                 key = f"{c['callerClass']}.{c['callerName']}"
                 if key not in page_map:
-                    # Check if already a child of any page
                     already_child = any(
                         any(ch["name"] == key for ch in pm["children"])
                         for pm in page_map.values()
@@ -1335,7 +1338,7 @@ async def api_mindmap(request: Request) -> JSONResponse:
 
             upstream = list(page_map.values())
         else:
-            # Direct callers (for non-Impl methods like Controllers)
+            # Direct callers (for Controllers, Services without Interface)
             callers = store.query(
                 "MATCH (caller:Method)-[r:CodeRelation {type: 'CALLS'}]->(target:Method) "
                 "WHERE target.className = $cls AND target.name = $method "
@@ -1350,21 +1353,50 @@ async def api_mindmap(request: Request) -> JSONResponse:
                 {"cls": class_name, "method": method_name},
             )
 
-            # USES_ENDPOINT pages as parents
+            # For Controller targets: USES_ENDPOINT pages are the callers (direct)
+            # For Service/Impl targets without Interface: try two-hop to find page→Controller→target
+            two_hop = store.query(
+                "MATCH (page:Method)-[r1:CodeRelation {type: 'USES_ENDPOINT'}]->(ctrl:Method)-[r2:CodeRelation {type: 'CALLS'}]->(target:Method) "
+                "WHERE target.className = $cls AND target.name = $method "
+                "RETURN page.name AS pageName, page.className AS pageClass, "
+                "       ctrl.name AS ctrlName, ctrl.className AS ctrlClass LIMIT 20",
+                {"cls": class_name, "method": method_name},
+            )
+
             page_map: dict[str, dict] = {}
+            # Build tree from two-hop USES_ENDPOINT: page → Controller → target
+            for c in two_hop:
+                pk = c["pageName"]
+                ctrl_key = f"{c['ctrlClass']}.{c['ctrlName']}"
+                if pk not in page_map:
+                    page_map[pk] = {"name": pk, "via": "USES_ENDPOINT", "children": []}
+                if not any(ch["name"] == ctrl_key for ch in page_map[pk]["children"]):
+                    page_map[pk]["children"].append({
+                        "name": ctrl_key,
+                        "via": "CALLS",
+                        "children": [],
+                    })
+
+            # Add flat USES_ENDPOINT callers (if any page directly calls this method)
             for c in ep_callers:
                 pk = c["callerName"]
-                page_map[pk] = {"name": pk, "via": "USES_ENDPOINT", "children": []}
+                if pk not in page_map:
+                    page_map[pk] = {"name": pk, "via": "USES_ENDPOINT", "children": []}
 
             # Add pure Java CALLS callers
             for c in callers:
                 key = f"{c['callerClass']}.{c['callerName']}"
                 if key not in page_map:
-                    page_map[key] = {"name": key, "via": "CALLS", "children": []}
+                    already_child = any(
+                        any(ch["name"] == key for ch in pm["children"])
+                        for pm in page_map.values()
+                    )
+                    if not already_child:
+                        page_map[key] = {"name": key, "via": "CALLS", "children": []}
 
             upstream = list(page_map.values())
 
-        # Downstream: find callees of the target method (nested tree)
+        # Downstream: build nested tree with depth-2 expansion
         callees = store.query(
             "MATCH (source:Method)-[r:CodeRelation {type: 'CALLS'}]->(callee:Method) "
             "WHERE source.className = $cls AND source.name = $method "
@@ -1379,18 +1411,44 @@ async def api_mindmap(request: Request) -> JSONResponse:
             callee_map[key] = node
             downstream.append(node)
 
-        # Depth 2: expand Mapper → Table by inference (MyBatis mappers have no outgoing CALLS edges)
+        # Depth-2 expansion: batch query all children of callees
+        if callee_map:
+            callee_keys = list(callee_map.keys())
+            # Build OR conditions for the batch query
+            conditions = " OR ".join(
+                f"(source.className = {json.dumps(k.rsplit('.', 1)[0])} AND source.name = {json.dumps(k.rsplit('.', 1)[1])})"
+                for k in callee_keys
+            )
+            depth2_rows = store.query(
+                f"MATCH (source:Method)-[r:CodeRelation {{type: 'CALLS'}}]->(child:Method) "
+                f"WHERE {conditions} "
+                f"RETURN source.className AS srcClass, source.name AS srcName, "
+                f"       child.name AS childName, child.className AS childClass LIMIT 200"
+            )
+            for r in depth2_rows:
+                parent_key = f"{r['srcClass']}.{r['srcName']}"
+                child_key = f"{r['childClass']}.{r['childName']}"
+                if parent_key in callee_map:
+                    if not any(ch["name"] == child_key for ch in callee_map[parent_key]["children"]):
+                        callee_map[parent_key]["children"].append({
+                            "name": child_key,
+                            "via": "CALLS",
+                            "children": [],
+                        })
+
+        # Depth-2: expand Mapper → Table by inference (MyBatis mappers have no outgoing CALLS edges)
         for key, node in callee_map.items():
             if "Mapper" in key or "DAO" in key:
                 parts = key.rsplit(".", 1)
                 if len(parts) == 2:
                     table_name = _infer_table_from_mapper(parts[0], parts[1])
                     if table_name:
-                        node["children"].append({
-                            "name": table_name,
-                            "via": "SQL (MyBatis)",
-                            "children": [],
-                        })
+                        if not any(ch["name"] == table_name for ch in node["children"]):
+                            node["children"].append({
+                                "name": table_name,
+                                "via": "SQL (MyBatis)",
+                                "children": [],
+                            })
 
         return _ok({
             "root": root_label,
@@ -1423,6 +1481,7 @@ def _infer_table_from_mapper(mapper_class: str, method_name: str) -> str:
 def create_app() -> Starlette:
     routes = [
         Route("/", dashboard),
+        Route("/demo", viz_demo),
         Route("/api/repos", api_list_repos),
         Route("/api/stats", api_stats),
         Route("/api/query", api_query),
