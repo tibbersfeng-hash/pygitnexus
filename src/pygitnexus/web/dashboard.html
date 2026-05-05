@@ -1,0 +1,2344 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PyGitNexus Dashboard</title>
+<script src="/static/d3.min.js"></script>
+<script src="/static/markmap-lib.min.js"></script>
+<script src="/static/markmap-view.min.js"></script>
+<script src="/static/markmap-toolbar.min.js"></script>
+<style>
+:root {
+  --bg: #0f1117;
+  --surface: #1a1d27;
+  --surface2: #252836;
+  --border: #333746;
+  --text: #e4e6ed;
+  --text2: #8b8fa3;
+  --accent: #7c6aff;
+  --accent2: #5b4fc4;
+  --green: #22c55e;
+  --orange: #f59e0b;
+  --red: #ef4444;
+  --cyan: #06b6d4;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); }
+#app { display: flex; min-height: 100vh; }
+
+/* Sidebar */
+.sidebar {
+  width: 200px; background: var(--surface); border-right: 1px solid var(--border);
+  padding: 20px 0; flex-shrink: 0;
+}
+.sidebar .logo { padding: 0 20px 20px; font-size: 16px; font-weight: 700; color: var(--accent); border-bottom: 1px solid var(--border); margin-bottom: 12px; }
+.sidebar .logo small { display: block; font-size: 11px; color: var(--text2); font-weight: 400; margin-top: 4px; }
+.nav-link {
+  display: block; padding: 10px 20px; color: var(--text2); text-decoration: none;
+  font-size: 14px; border-left: 3px solid transparent; cursor: pointer;
+}
+.nav-link:hover { color: var(--text); background: var(--surface2); }
+.nav-link.active { color: var(--accent); border-left-color: var(--accent); background: rgba(124,106,255,0.08); }
+
+/* Main content */
+.main { flex: 1; padding: 24px 32px; overflow-y: auto; }
+.section { display: none; }
+.section.active { display: block; }
+
+/* Stats cards */
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.stat-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  padding: 20px; text-align: center;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.stat-card:hover { border-color: var(--accent); box-shadow: 0 0 12px rgba(124,106,255,0.15); }
+.stat-card .num { font-size: 28px; font-weight: 700; color: var(--accent); }
+.stat-card .label { font-size: 13px; color: var(--text2); margin-top: 4px; }
+
+/* Relation table */
+.rel-table { width: 100%; border-collapse: collapse; }
+.rel-table th, .rel-table td { padding: 10px 14px; text-align: left; border-bottom: 1px solid var(--border); font-size: 14px; }
+.rel-table th { color: var(--text2); font-weight: 500; }
+.rel-table tr:hover { background: var(--surface2); }
+
+/* Search */
+.search-bar { display: flex; gap: 10px; margin-bottom: 20px; }
+.search-bar input, .cypher-input, .impact-form input, .impact-form select {
+  flex: 1; background: var(--surface2); border: 1px solid var(--border); color: var(--text);
+  padding: 10px 14px; border-radius: 8px; font-size: 14px; outline: none;
+}
+.search-bar input:focus, .cypher-input:focus { border-color: var(--accent); }
+button, .btn {
+  background: var(--accent); color: #fff; border: none; padding: 10px 20px;
+  border-radius: 8px; font-size: 14px; cursor: pointer; font-weight: 500; white-space: nowrap;
+}
+button:hover { background: var(--accent2); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+.browse-tab {
+  background: var(--surface2); color: var(--text2); border: 1px solid var(--border);
+  padding: 8px 16px; border-radius: 6px; font-size: 13px; cursor: pointer; font-weight: 500;
+}
+.browse-tab:hover { color: var(--text); }
+.browse-tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.browse-header { display: flex; gap: 12px; margin-bottom: 16px; align-items: center; flex-wrap: wrap; }
+.browse-tabs { display: flex; gap: 8px; flex-wrap: wrap; }
+.browse-search {
+  background: var(--surface2); border: 1px solid var(--border); color: var(--text);
+  padding: 8px 14px; border-radius: 8px; font-size: 14px; outline: none; flex: 1; min-width: 200px;
+}
+.browse-search:focus { border-color: var(--accent); }
+
+/* Cypher Query Builder */
+.cypher-builder { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 12px; }
+.builder-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+.builder-row select { background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 8px 12px; border-radius: 6px; font-size: 13px; outline: none; flex: 1; min-width: 120px; }
+.builder-row select:focus { border-color: var(--accent); }
+.builder-presets { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.preset-label { font-size: 12px; color: var(--text2); white-space: nowrap; }
+.preset-btn { background: var(--surface2); color: var(--text2); border: 1px solid var(--border); padding: 6px 12px; border-radius: 6px; font-size: 12px; cursor: pointer; }
+.preset-btn:hover { color: var(--text); border-color: var(--accent); }
+
+/* Results */
+.result-list { list-style: none; }
+.result-item {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 14px 18px; margin-bottom: 8px; cursor: pointer; transition: border-color 0.15s;
+}
+.result-item:hover { border-color: var(--accent); }
+.result-item .type { font-size: 11px; color: var(--cyan); text-transform: uppercase; letter-spacing: 0.5px; }
+.result-item .name { font-size: 15px; font-weight: 600; margin: 4px 0 2px; }
+.result-item .path { font-size: 12px; color: var(--text2); }
+
+/* Symbol detail */
+.symbol-detail { margin-top: 20px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px; }
+.symbol-detail h3 { margin-bottom: 16px; font-size: 16px; }
+.detail-group { margin-bottom: 16px; }
+.detail-group h4 { font-size: 13px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+.detail-group .item { padding: 6px 10px; font-size: 13px; border-left: 2px solid var(--border); margin-left: 8px; }
+
+/* Mindmap */
+.mindmap-container { margin-top: 8px; margin-bottom: 20px; background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; }
+.mindmap-container .mindmap-title-bar { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+.mindmap-container .mindmap-title { font-size: 14px; font-weight: 600; color: var(--accent); text-transform: uppercase; letter-spacing: 0.5px; }
+.mindmap-fullscreen-btn { background: var(--surface); color: var(--text2); border: 1px solid var(--border); padding: 4px 10px; border-radius: 6px; font-size: 12px; cursor: pointer; }
+.mindmap-fullscreen-btn:hover { color: var(--accent); border-color: var(--accent); }
+.mindmap-canvas { width: 100%; max-height: 60vh; position: relative; overflow: auto; cursor: grab; }
+.mindmap-canvas.dragging { cursor: grabbing; }
+.mindmap-canvas svg { display: block; }
+.mindmap-canvas .mindmap-node:hover rect { stroke-opacity: 1 !important; fill: var(--surface2); }
+.mindmap-canvas .mm-panel-label {
+  position: absolute; top: 8px; font-size: 11px; color: var(--text2);
+  text-transform: uppercase; letter-spacing: 1px; padding: 2px 8px;
+  border-radius: 4px; pointer-events: none; z-index: 5;
+}
+
+/* Mindmap fullscreen overlay */
+.mindmap-overlay {
+  display: none; position: fixed; inset: 0; z-index: 9999;
+  background: var(--bg); flex-direction: column;
+}
+.mindmap-overlay.active { display: flex; }
+.mindmap-overlay .overlay-toolbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 20px; background: var(--surface); border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.mindmap-overlay .overlay-title { font-size: 15px; font-weight: 600; color: var(--accent); }
+.mindmap-overlay .overlay-close {
+  background: var(--accent); color: #fff; border: none; padding: 6px 16px;
+  border-radius: 6px; font-size: 13px; cursor: pointer; font-weight: 500;
+}
+.mindmap-overlay .overlay-close:hover { background: var(--accent2); }
+.mindmap-overlay .overlay-body { flex: 1; overflow: auto; padding: 20px; }
+
+/* Cypher */
+.cypher-input { width: 100%; margin-bottom: 12px; }
+.cypher-results { margin-top: 16px; }
+.cypher-results table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.cypher-results th, .cypher-results td { padding: 8px 12px; border-bottom: 1px solid var(--border); text-align: left; max-width: 400px; overflow: hidden; text-overflow: ellipsis; }
+.cypher-results th { color: var(--text2); }
+
+/* Impact */
+.impact-form { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
+.impact-form input[type="text"] { min-width: 200px; }
+.impact-form input[type="number"] { width: 80px; flex: none; }
+.risk-badge {
+  display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 13px; font-weight: 600;
+}
+.risk-LOW { background: rgba(34,197,94,0.15); color: var(--green); }
+.risk-MEDIUM { background: rgba(245,158,11,0.15); color: var(--orange); }
+.risk-HIGH { background: rgba(239,68,68,0.15); color: var(--red); }
+.risk-CRITICAL { background: rgba(239,68,68,0.25); color: #f87171; }
+.impact-depth { margin-top: 16px; }
+.impact-depth h4 { font-size: 14px; color: var(--accent); margin-bottom: 8px; }
+.impact-depth .item { font-size: 13px; padding: 4px 10px; border-left: 2px solid var(--border); margin-left: 8px; }
+
+/* Toast */
+.toast {
+  position: fixed; bottom: 20px; right: 20px; background: var(--red); color: #fff;
+  padding: 12px 20px; border-radius: 8px; font-size: 14px; z-index: 1000;
+  animation: slideIn 0.3s ease;
+}
+@keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+
+/* Loading */
+.loading { color: var(--text2); font-size: 14px; }
+
+/* Repo selector */
+#repo-selector {
+  background: var(--surface2); border: 1px solid var(--border); color: var(--text);
+  padding: 6px 10px; border-radius: 6px; font-size: 13px; margin-left: 16px;
+}
+
+/* Help section */
+.help-content { max-width: 720px; }
+.help-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  padding: 20px 24px; margin-bottom: 16px;
+}
+.help-card h3 { font-size: 16px; color: var(--accent); margin-bottom: 10px; }
+.help-card p { font-size: 14px; color: var(--text); line-height: 1.7; margin-bottom: 8px; }
+.help-card ul { padding-left: 20px; }
+.help-card li { font-size: 14px; color: var(--text2); line-height: 1.8; }
+.help-card code {
+  background: var(--surface2); padding: 2px 8px; border-radius: 4px; font-size: 12px;
+  color: var(--cyan); font-family: 'Fira Code', 'Consolas', monospace;
+}
+
+/* Database Chain */
+.db-section-title {
+  font-size: 15px; font-weight: 600; color: var(--text2); margin: 20px 0 12px;
+  padding-bottom: 6px; border-bottom: 1px solid var(--border);
+}
+.db-tables {
+  display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px;
+}
+.db-table-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 12px 16px; min-width: 200px;
+}
+.db-table-card .tbl-name { font-size: 15px; font-weight: 700; color: var(--orange); font-family: monospace; }
+.db-table-card .tbl-class { font-size: 12px; color: var(--text2); margin-top: 4px; }
+.db-chain-row {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 12px 16px; margin-bottom: 8px; display: flex; align-items: center; gap: 8px;
+  font-size: 12px; flex-wrap: wrap;
+}
+.db-chain-step {
+  display: flex; align-items: center; gap: 4px;
+}
+.db-chain-step .step-label { font-size: 10px; color: var(--text2); text-transform: uppercase; }
+.db-chain-step .step-name { font-weight: 600; font-family: monospace; }
+.step-ctrl .step-name { color: var(--green); }
+.step-svc .step-name { color: var(--cyan); }
+.step-repo .step-name { color: var(--orange); }
+.step-table .step-name { color: var(--accent); }
+.db-arrow { color: var(--text2); font-size: 14px; }
+.db-orm-badge {
+  font-size: 10px; padding: 2px 8px; border-radius: 10px;
+  background: rgba(124,106,255,0.12); color: var(--accent);
+}
+.db-op-badge {
+  font-size: 10px; padding: 2px 8px; border-radius: 4px; font-weight: 700;
+}
+.op-READ { background: rgba(34,197,94,0.15); color: var(--green); }
+.op-WRITE { background: rgba(239,68,68,0.15); color: var(--red); }
+.op-UPDATE { background: rgba(245,158,11,0.15); color: var(--orange); }
+.op-DELETE { background: rgba(239,68,68,0.25); color: #f87171; }
+.op-COUNT { background: rgba(6,182,212,0.15); color: var(--cyan); }
+.op-UNKNOWN { background: var(--surface2); color: var(--text2); }
+.db-repo-method {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 14px; margin-bottom: 6px; font-size: 13px;
+}
+.db-repo-method .method-sig { font-family: monospace; font-weight: 600; }
+.db-repo-method .method-sql {
+  font-family: monospace; font-size: 11px; color: var(--cyan);
+  background: var(--surface2); padding: 4px 10px; border-radius: 4px;
+  margin-top: 6px; display: block; word-break: break-all;
+}
+.db-jt-service {
+  display: inline-block; background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 12px; margin: 4px; font-size: 12px;
+}
+
+/* Field Impact */
+.fi-summary {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; margin-bottom: 24px;
+}
+.fi-summary-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; text-align: center;
+}
+.fi-summary-card .num { font-size: 24px; font-weight: 700; }
+.fi-summary-card .label { font-size: 12px; color: var(--text2); margin-top: 4px; }
+.fi-chain-group {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  margin-bottom: 16px; overflow: hidden;
+}
+.fi-chain-header {
+  padding: 14px 18px; display: flex; justify-content: space-between; align-items: center;
+  cursor: pointer; user-select: none;
+}
+.fi-chain-header:hover { background: var(--surface2); }
+.fi-chain-title { display: flex; align-items: center; gap: 10px; }
+.fi-chain-title .page-name { font-size: 15px; font-weight: 600; color: var(--cyan); }
+.fi-chain-title .api-info { font-size: 12px; color: var(--text2); font-family: monospace; }
+.fi-chain-count { font-size: 12px; color: var(--text2); }
+.fi-chain-body { display: none; padding: 16px 18px; border-top: 1px solid var(--border); }
+.fi-chain-body.open { display: block; }
+.fi-full-chain {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 12px 16px;
+  background: var(--surface2); border-radius: 8px; margin-bottom: 12px;
+}
+.fi-node {
+  display: inline-flex; flex-direction: column; align-items: center; padding: 8px 12px;
+  border-radius: 8px; font-size: 12px; min-width: 80px; text-align: center;
+}
+.fi-node .node-label { font-size: 10px; font-weight: 600; text-transform: uppercase; opacity: 0.7; margin-bottom: 2px; }
+.fi-node .node-name { font-weight: 500; font-size: 12px; }
+.fi-node.frontend { background: rgba(6,182,212,0.15); color: var(--cyan); }
+.fi-node.controller { background: rgba(124,106,255,0.15); color: var(--accent); }
+.fi-node.service { background: rgba(245,158,11,0.15); color: var(--orange); }
+.fi-node.mapper { background: rgba(239,68,68,0.15); color: var(--red); }
+.fi-node.table { background: rgba(34,197,94,0.15); color: var(--green); }
+.fi-arrow { color: var(--text2); font-size: 16px; white-space: nowrap; }
+.fi-fields {
+  padding: 12px 16px; background: var(--surface2); border-radius: 8px;
+}
+.fi-fields-title { font-size: 13px; font-weight: 600; color: var(--text2); margin-bottom: 8px; }
+.fi-field {
+  display: inline-block; background: rgba(34,197,94,0.1); border: 1px solid rgba(34,197,94,0.3);
+  border-radius: 6px; padding: 4px 10px; margin: 2px 4px; font-size: 12px; font-family: monospace; color: var(--green);
+}
+.fi-field-op { font-size: 10px; color: var(--text2); margin-left: 4px; }
+.fi-wildcard-note {
+  font-size: 12px; color: var(--orange); padding: 8px 16px; background: rgba(245,158,11,0.08);
+  border-radius: 8px; border: 1px solid rgba(245,158,11,0.2); margin-top: 8px;
+}
+
+/* Layered Architecture */
+.arch-layer {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  margin-bottom: 16px; overflow: hidden;
+}
+.arch-layer-header {
+  padding: 12px 18px; display: flex; justify-content: space-between; align-items: center;
+  cursor: pointer; user-select: none;
+}
+.arch-layer-header:hover { background: var(--surface2); }
+.arch-layer-header .layer-name { font-size: 15px; font-weight: 600; }
+.arch-layer-header .layer-count { font-size: 12px; color: var(--text2); }
+.arch-layer-body { display: none; padding: 12px 18px; border-top: 1px solid var(--border); }
+.arch-layer-body.open { display: block; }
+.arch-chip {
+  display: inline-block; background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 12px; margin: 4px; font-size: 12px; cursor: default;
+}
+.arch-chip:hover { border-color: var(--accent); }
+.arch-call-row {
+  display: flex; align-items: center; gap: 12px; padding: 6px 0;
+  border-bottom: 1px solid var(--border); font-size: 13px;
+}
+.arch-call-row:last-child { border-bottom: none; }
+.arch-call-row .arrow { color: var(--accent); font-weight: 700; }
+.arch-call-row .call-count {
+  font-size: 11px; color: var(--text2); background: var(--surface2);
+  padding: 2px 8px; border-radius: 10px;
+}
+.arch-arrow {
+  text-align: center; font-size: 24px; color: var(--accent); padding: 8px 0;
+}
+
+/* Scheduled Tasks */
+.scheduled-task {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 14px 18px; margin-bottom: 8px; display: flex; align-items: center; gap: 14px;
+}
+.scheduled-task.hidden { display: none; }
+.scheduled-task .task-icon { font-size: 20px; width: 28px; text-align: center; flex-shrink: 0; }
+.scheduled-task .task-info { flex: 1; min-width: 0; }
+.scheduled-task .task-name { font-size: 14px; font-weight: 600; font-family: 'Fira Code', monospace; }
+.scheduled-task .task-class { font-size: 12px; color: var(--text2); }
+.scheduled-type-badge {
+  font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 4px;
+  letter-spacing: 0.5px; white-space: nowrap;
+}
+.badge-cron { background: rgba(124,106,255,0.15); color: var(--accent); }
+.badge-fixedRate { background: rgba(6,182,212,0.15); color: var(--cyan); }
+.scheduled-expr {
+  font-size: 12px; font-family: 'Fira Code', monospace; color: var(--orange);
+  background: var(--surface2); padding: 2px 10px; border-radius: 4px; white-space: nowrap;
+}
+.scheduled-delay {
+  font-size: 11px; color: var(--text2); white-space: nowrap;
+}
+
+/* Project Structure Tree */
+.tree-node { margin-left: 18px; }
+.tree-node-root { margin-left: 0; }
+.tree-label {
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 6px;
+  border-radius: 4px; cursor: default; line-height: 1.6;
+}
+.tree-label:hover { background: var(--surface2); }
+.tree-label .icon { font-size: 14px; width: 18px; text-align: center; }
+.tree-label .folder-icon { color: var(--orange); }
+.tree-label .file-icon { color: var(--text2); }
+.tree-label .name { color: var(--text); }
+.tree-label .badge {
+  font-size: 10px; padding: 1px 8px; border-radius: 10px;
+  background: rgba(124,106,255,0.12); color: var(--accent);
+}
+.tree-toggle {
+  display: inline-block; width: 18px; text-align: center; cursor: pointer;
+  color: var(--text2); user-select: none; font-size: 12px; transition: transform 0.15s;
+}
+.tree-toggle:hover { color: var(--text); }
+.tree-toggle.open { transform: rotate(90deg); }
+.tree-children { display: none; }
+.tree-children.open { display: block; }
+.tree-node.hidden { display: none; }
+
+/* API Explorer */
+.explorer-toolbar { display: flex; gap: 12px; margin-bottom: 16px; align-items: center; flex-wrap: wrap; }
+.explorer-toolbar .browse-search { flex: 1; }
+.explorer-stats { font-size: 13px; color: var(--text2); white-space: nowrap; }
+.explorer-controller {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  margin-bottom: 12px; overflow: hidden;
+}
+.explorer-ctrl-header {
+  padding: 14px 18px; cursor: pointer; display: flex; justify-content: space-between;
+  align-items: center; user-select: none;
+}
+.explorer-ctrl-header:hover { background: var(--surface2); }
+.explorer-ctrl-header .ctrl-name { font-size: 15px; font-weight: 600; color: var(--accent); }
+.explorer-ctrl-header .ctrl-path { font-size: 12px; color: var(--text2); }
+.explorer-ctrl-header .ctrl-badge {
+  font-size: 11px; color: var(--text2); background: var(--surface2);
+  padding: 2px 10px; border-radius: 12px;
+}
+.explorer-ctrl-header .toggle-icon { transition: transform 0.2s; font-size: 12px; color: var(--text2); }
+.explorer-ctrl-header.open .toggle-icon { transform: rotate(90deg); }
+.explorer-endpoints { display: none; border-top: 1px solid var(--border); }
+.explorer-endpoints.open { display: block; }
+.explorer-ep {
+  display: flex; align-items: center; padding: 8px 18px; gap: 12px;
+  border-bottom: 1px solid var(--border); font-size: 13px;
+}
+.explorer-ep:last-child { border-bottom: none; }
+.method-badge {
+  font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 4px;
+  letter-spacing: 0.5px; min-width: 50px; text-align: center;
+}
+.method-GET { background: rgba(34,197,94,0.15); color: var(--green); }
+.method-POST { background: rgba(245,158,11,0.15); color: var(--orange); }
+.method-PUT { background: rgba(6,182,212,0.15); color: var(--cyan); }
+.method-DELETE { background: rgba(239,68,68,0.15); color: var(--red); }
+.method-PATCH { background: rgba(168,85,247,0.15); color: #a855f7; }
+.explorer-ep .ep-path { color: var(--text); font-family: 'Fira Code', monospace; font-size: 12px; }
+.explorer-ep .ep-method-name { color: var(--text2); font-size: 12px; }
+.explorer-ep.hidden { display: none; }
+.explorer-controller.hidden { display: none; }
+</style>
+</head>
+<body>
+<div id="app">
+  <nav class="sidebar">
+    <div class="logo">PyGitNexus<small>Knowledge Graph Dashboard</small></div>
+    <a class="nav-link active" data-section="overview">Overview</a>
+    <a class="nav-link" data-section="search">Symbol Search</a>
+    <a class="nav-link" data-section="browse">Browse All</a>
+    <a class="nav-link" data-section="cypher">Cypher Editor</a>
+    <a class="nav-link" data-section="impact">Impact Analysis</a>
+    <a class="nav-link" data-section="structure">项目结构</a>
+    <a class="nav-link" data-section="scheduled">定时任务</a>
+    <a class="nav-link" data-section="architecture">分层架构</a>
+    <a class="nav-link" data-section="dbchain">数据库链路</a>
+    <a class="nav-link" data-section="frontend">前端页面映射</a>
+    <a class="nav-link" data-section="fieldImpact">字段影响</a>
+    <a class="nav-link" data-section="explorer">API Explorer</a>
+    <a class="nav-link" data-section="help">Help</a>
+  </nav>
+  <div class="main">
+    <header style="display:flex;align-items:center;margin-bottom:20px">
+      <h2 id="section-title" style="font-size:20px;font-weight:600">Overview</h2>
+      <select id="repo-selector"><option value="">-- Auto-detect --</option></select>
+    </header>
+
+    <!-- Overview -->
+    <section id="overview" class="section active">
+      <div id="stats-cards" class="stats-grid"></div>
+      <div id="overview-detail"><p style="color:var(--text2);font-size:13px;text-align:center;padding:20px">点击上方卡片查看列表</p></div>
+    </section>
+
+    <!-- Browse All -->
+    <section id="browse" class="section">
+      <div class="browse-header">
+        <div class="browse-tabs">
+          <button class="browse-tab active" data-type="Class">Classes</button>
+          <button class="browse-tab" data-type="Interface">Interfaces</button>
+          <button class="browse-tab" data-type="Method">Methods</button>
+          <button class="browse-tab" data-type="Field">Fields</button>
+          <button class="browse-tab" data-type="File">Files</button>
+        </div>
+        <input id="browse-search" class="browse-search" placeholder="Filter by name or path..." />
+      </div>
+      <div id="browse-list" class="result-list"></div>
+      <div id="browse-pagination" style="display:flex;align-items:center;justify-content:space-between;margin-top:16px">
+        <span id="browse-info" style="font-size:13px;color:var(--text2)"></span>
+        <div style="display:flex;gap:8px">
+          <button id="browse-prev" disabled>Prev</button>
+          <span id="browse-page" style="line-height:36px;font-size:14px;color:var(--text2)">1/1</span>
+          <button id="browse-next" disabled>Next</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Symbol Search -->
+    <section id="search" class="section">
+      <div class="search-bar">
+        <input id="search-input" placeholder="Search symbols (class, method, field, file)..." />
+        <button id="search-btn">Search</button>
+      </div>
+      <ul id="search-results" class="result-list"></ul>
+      <div id="symbol-detail" class="symbol-detail" style="display:none"></div>
+    </section>
+
+    <!-- Cypher Editor -->
+    <section id="cypher" class="section">
+      <!-- Query Builder -->
+      <div class="cypher-builder">
+        <div class="builder-row">
+          <select id="qb-node-type"><option value="">Node type</option>
+            <option value="Class">Class</option><option value="Interface">Interface</option>
+            <option value="Method">Method</option><option value="Field">Field</option>
+            <option value="File">File</option><option value="Folder">Folder</option>
+          </select>
+          <select id="qb-field"><option value="">Return field</option>
+            <option value="name">name</option><option value="filePath">filePath</option>
+            <option value="startLine">startLine</option>
+          </select>
+          <select id="qb-rel"><option value="">Relation</option>
+            <option value="CodeRelation">CALLS</option>
+            <option value="ImportRelation">IMPORTS</option>
+          </select>
+          <select id="qb-direction"><option value="">Direction</option>
+            <option value="outgoing">Outgoing (-&gt;)</option><option value="incoming">Incoming (&lt;-)</option>
+          </select>
+          <button id="qb-generate">Generate</button>
+          <button id="qb-clear" style="background:var(--surface2)">Clear</button>
+        </div>
+        <!-- Preset queries -->
+        <div class="builder-presets">
+          <span class="preset-label">Presets:</span>
+          <button class="preset-btn" data-q="MATCH (n:Class) RETURN n.name, count{(n)-[r:CodeRelation]-()} AS relCount ORDER BY relCount DESC LIMIT 20">Most connected classes</button>
+          <button class="preset-btn" data-q="MATCH (n:Class)-[:CodeRelation]-() RETURN DISTINCT n.name ORDER BY n.name">Classes with relations</button>
+          <button class="preset-btn" data-q="MATCH (n:Method) WHERE n.name CONTAINS 'Service' RETURN n.name, n.filePath ORDER BY n.name">Methods with 'Service'</button>
+          <button class="preset-btn" data-q="MATCH (n:Interface) RETURN n.name, n.filePath ORDER BY n.name">All interfaces</button>
+        </div>
+      </div>
+      <textarea id="cypher-input" class="cypher-input" rows="4" placeholder="MATCH (n:Class) RETURN n.name, n.filePath"></textarea>
+      <button id="cypher-run">Run Query</button>
+      <div id="cypher-results" class="cypher-results"></div>
+    </section>
+
+    <!-- Impact Analysis -->
+    <section id="impact" class="section">
+      <div class="impact-form">
+        <input id="impact-target" type="text" placeholder="Symbol name (e.g., UserService)" />
+        <select id="impact-direction">
+          <option value="upstream">↑ 上游（调用者）</option>
+          <option value="downstream">↓ 下游（被调用者）</option>
+          <option value="both">↕ 上下游（同时查询）</option>
+        </select>
+        <input id="impact-depth" type="number" value="3" min="1" max="10" title="Max depth" />
+        <button id="impact-run">Analyze</button>
+      </div>
+      <div id="impact-results"></div>
+    </section>
+
+    <!-- Project Structure Tree -->
+    <section id="structure" class="section">
+      <div style="margin-bottom:12px">
+        <input id="tree-filter" class="browse-search" placeholder="Filter by name..." />
+      </div>
+      <div id="tree-list" style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;font-size:13px;max-height:70vh;overflow-y:auto"></div>
+    </section>
+
+    <!-- Scheduled Tasks -->
+    <section id="scheduled" class="section">
+      <div style="margin-bottom:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <input id="scheduled-filter" class="browse-search" placeholder="Filter by method, class, or cron..." />
+        <select id="scheduled-type-filter" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:6px;font-size:13px">
+          <option value="">All types</option>
+          <option value="cron">Cron</option>
+          <option value="fixedRate">Fixed Rate</option>
+        </select>
+        <span id="scheduled-count" style="font-size:13px;color:var(--text2)"></span>
+      </div>
+      <div id="scheduled-list"></div>
+    </section>
+
+    <!-- Layered Architecture -->
+    <section id="architecture" class="section">
+      <div id="architecture-list"></div>
+    </section>
+
+    <!-- Database Chain -->
+    <section id="dbchain" class="section">
+      <div id="dbchain-list"></div>
+    </section>
+
+    <!-- Frontend Pages Mapping -->
+    <section id="frontend" class="section">
+      <div style="margin-bottom:16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <input id="frontend-path" class="browse-search" placeholder="Frontend source path (e.g., /path/to/vue-app) ..." style="flex:2" />
+        <button id="frontend-load">Scan & Match</button>
+        <span id="frontend-stats" style="font-size:13px;color:var(--text2)"></span>
+      </div>
+      <div id="frontend-list"></div>
+    </section>
+
+    <!-- DB Field Impact -->
+    <section id="fieldImpact" class="section">
+      <div style="margin-bottom:16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <select id="fi-table" class="browse-search" style="max-width:300px">
+          <option value="">选择数据表...</option>
+        </select>
+        <select id="fi-field" class="browse-search" style="max-width:250px;display:none">
+          <option value="">全部字段</option>
+        </select>
+        <input id="fi-group" class="browse-search" style="max-width:200px" placeholder="Group (可选)" />
+        <button id="fi-load">分析</button>
+      </div>
+      <div id="fi-content"></div>
+    </section>
+
+    <!-- API Explorer -->
+    <section id="explorer" class="section">
+      <div class="explorer-toolbar">
+        <input id="explorer-filter" class="browse-search" placeholder="Filter controllers or endpoints..." />
+        <div class="explorer-stats" id="explorer-stats"></div>
+      </div>
+      <div id="explorer-list"></div>
+    </section>
+
+    <!-- Help -->
+    <section id="help" class="section">
+      <div class="help-content">
+        <div class="help-card">
+          <h3>Overview（总览）</h3>
+          <p>展示当前仓库的知识图谱统计数据，包括文件数、类数、方法数等，以及各类关系（调用、导入等）的数量分布。</p>
+        </div>
+        <div class="help-card">
+          <h3>Symbol Search（符号搜索）</h3>
+          <p>按关键字搜索代码库中的所有符号（类、方法、字段、文件等）。点击搜索结果可查看详情，包括调用者（Callers）、被调用者（Callees）和导入信息（Imports）。</p>
+        </div>
+        <div class="help-card">
+          <h3>Browse All（全量浏览）</h3>
+          <p>无需搜索即可浏览所有符号。支持按类型切换（Classes / Interfaces / Methods / Fields / Files），并提供关键字过滤和分页浏览功能。点击任意符号可查看详情。</p>
+        </div>
+        <div class="help-card">
+          <h3>Cypher Editor（Cypher 查询编辑器）</h3>
+          <p>直接编写和执行 Cypher 图数据库查询。上方提供<strong>Query Builder</strong>（通过选择框组合条件自动生成查询语句）和<strong>Presets</strong>（常用预设查询一键填入）。支持 Ctrl+Enter 快捷执行。</p>
+          <p>常用查询模式：</p>
+          <ul>
+            <li><code>MATCH (n:Class) RETURN n.name, n.filePath</code> — 列出所有类</li>
+            <li><code>MATCH (n:Class)-[r:CodeRelation]-&gt;(m) RETURN n.name, m.name, r.type</code> — 查询调用关系</li>
+            <li><code>MATCH (n:Method) WHERE n.name CONTAINS 'Service' RETURN n.name, n.filePath</code> — 按名称过滤</li>
+          </ul>
+        </div>
+        <div class="help-card">
+          <h3>Impact Analysis（影响分析）</h3>
+          <p>输入目标符号名，选择分析方向（上游调用者 / 下游被调用者）和最大深度，BFS 遍历知识图谱以评估变更影响范围。结果按深度分级显示：WILL BREAK（直接影响）→ LIKELY AFFECTED（可能影响）→ MAY NEED TESTING（需测试）。</p>
+        </div>
+        <div class="help-card">
+          <h3>前端页面映射</h3>
+          <p>扫描前端源码（<code>.vue</code>、<code>.js</code>、<code>.ts</code>）中的 API 调用（axios / fetch / http.request），与后端 HTTP 端点进行匹配，并关联到数据库表。支持：</p>
+          <ul>
+            <li><code>axios.get('/api/xxx')</code>、<code>axios.post('/api/xxx', data)</code></li>
+            <li><code>http.request('GET', '/api/xxx')</code></li>
+            <li><code>fetch('/api/xxx')</code></li>
+            <li>模板字符串：<code>axios.get(\`/api/user/\${id}\`)</code> — 通过参数模式匹配</li>
+          </ul>
+          <p>输入前端项目源码路径后点击"Scan &amp; Match"，系统将展示<strong>前端页面 → API 调用 → 后端 Controller → Service → 数据库表</strong>的完整链路。</p>
+        </div>
+        <div class="help-card">
+          <h3>其他提示</h3>
+          <ul>
+            <li>页面顶部的仓库选择器可在已索引仓库之间切换，切换后自动刷新当前页面数据。</li>
+            <li>所有操作结果以列表或表格形式展示，支持点击查看详情。</li>
+            <li>查询结果过大时请使用分页或添加过滤条件。</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+  </div>
+</div>
+
+<!-- Mindmap fullscreen overlay -->
+<div id="mindmap-overlay" class="mindmap-overlay">
+  <div class="overlay-toolbar">
+    <span class="overlay-title" id="mindmap-overlay-title">Call Chain Mindmap</span>
+    <button class="overlay-close" onclick="closeMindmapFullscreen()">✕ 关闭 (Esc)</button>
+  </div>
+  <div class="overlay-body" id="mindmap-overlay-body"></div>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const API = '';
+
+// ── Helpers ──
+function getRepo() { return $('#repo-selector').value || null; }
+function qs(key, val) { return val ? `${key}=${encodeURIComponent(val)}` : ''; }
+async function api(path, opts = {}) {
+  const repo = getRepo();
+  const url = path + (path.includes('?') ? '&' : '?') + qs('repo', repo || '');
+  const r = await fetch(url, { headers: { 'Content-Type': 'application/json' }, ...opts });
+  const data = await r.json();
+  if (!data.ok) { toast(data.error); return null; }
+  return data.data;
+}
+function toast(msg) {
+  const t = document.createElement('div');
+  t.className = 'toast'; t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 4000);
+}
+function fmt(n) { return Number(n).toLocaleString(); }
+
+// ── Navigation ──
+document.querySelectorAll('.nav-link').forEach(link => {
+  link.addEventListener('click', () => {
+    document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
+    document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+    link.classList.add('active');
+    const id = link.dataset.section;
+    $(`#${id}`).classList.add('active');
+    $('#section-title').textContent = link.textContent;
+    if (id === 'overview') loadOverview();
+    if (id === 'browse') { browseState.page = 1; loadBrowse(); }
+    if (id === 'explorer') loadExplorer();
+    if (id === 'structure') loadTree();
+    if (id === 'scheduled') loadScheduled();
+    if (id === 'architecture') loadArchitecture();
+    if (id === 'dbchain') loadDbChain();
+    if (id === 'frontend') loadFrontendPages();
+    if (id === 'fieldImpact') loadFieldImpact();
+  });
+});
+
+// ── Repo Selector ──
+async function loadRepos() {
+  const repos = await api('/api/repos');
+  if (!repos) return;
+  const sel = $('#repo-selector');
+  repos.forEach(r => {
+    const o = document.createElement('option');
+    o.value = r.path; o.textContent = r.name;
+    sel.appendChild(o);
+  });
+  // Re-fetch current section when repo changes
+  sel.addEventListener('change', () => {
+    const activeLink = document.querySelector('.nav-link.active');
+    if (!activeLink) return;
+    const id = activeLink.dataset.section;
+    if (id === 'overview') loadOverview();
+    if (id === 'browse') { browseState.page = 1; loadBrowse(); }
+    if (id === 'search' && $('#search-input').value.trim()) doSearch();
+    if (id === 'structure') loadTree();
+    if (id === 'scheduled') loadScheduled();
+    if (id === 'architecture') loadArchitecture();
+    if (id === 'dbchain') loadDbChain();
+    if (id === 'frontend') loadFrontendPages();
+    if (id === 'fieldImpact') loadFieldImpact();
+  });
+}
+
+// ── Overview ──
+let overviewDbInfo = null;
+
+async function loadOverview() {
+  const stats = await api('/api/stats');
+  if (!stats) return;
+
+  // Load database info in parallel
+  overviewDbInfo = await api('/api/database');
+
+  const cards = $('#stats-cards');
+  cards.innerHTML = '';
+  const detail = $('#overview-detail');
+  detail.innerHTML = '';
+
+  // Node type cards
+  const nodeLabels = { file: 'Files', folder: 'Folders', class: 'Classes', interface: 'Interfaces', method: 'Methods', field: 'Fields' };
+  for (const [key, label] of Object.entries(nodeLabels)) {
+    const count = stats.nodes[key] || 0;
+    const card = document.createElement('div');
+    card.className = 'stat-card';
+    card.style.cursor = 'pointer';
+    card.innerHTML = `<div class="num">${fmt(count)}</div><div class="label">${label}</div>`;
+    card.addEventListener('click', () => showOverviewDetail(key, count, stats));
+    cards.appendChild(card);
+  }
+
+  // Relations card
+  const relCount = Object.values(stats.relations).reduce((a, b) => a + b, 0);
+  const relCard = document.createElement('div');
+  relCard.className = 'stat-card';
+  relCard.style.cursor = 'pointer';
+  relCard.innerHTML = `<div class="num" style="color:var(--cyan)">${fmt(relCount)}</div><div class="label">Relations</div>`;
+  relCard.addEventListener('click', () => showRelationsCard(stats.relations));
+  cards.appendChild(relCard);
+
+  // Database cards
+  if (overviewDbInfo) {
+    const dbItems = [
+      { key: 'tables', label: 'Database Tables', count: overviewDbInfo.tables?.length || 0, detail: () => showTablesList() },
+      { key: 'models', label: 'Model Classes', count: overviewDbInfo.models?.length || 0, detail: () => showModelsList() },
+      { key: 'repositories', label: 'Repositories', count: overviewDbInfo.repositories?.length || 0, detail: () => showReposList() },
+      { key: 'transactional', label: 'Transactional', count: overviewDbInfo.transactional?.length || 0, detail: () => showTransactionalList() },
+    ];
+    for (const { label, count, detail: showDetail } of dbItems) {
+      if (count > 0) {
+        const card = document.createElement('div');
+        card.className = 'stat-card';
+        card.style.cursor = 'pointer';
+        card.innerHTML = `<div class="num" style="color:var(--orange)">${count}</div><div class="label">${label}</div>`;
+        card.addEventListener('click', showDetail);
+        cards.appendChild(card);
+      }
+    }
+  }
+}
+
+function showOverviewDetail(key, count, stats) {
+  const detail = $('#overview-detail');
+  const labelMap = { class: 'Classes', interface: 'Interfaces', method: 'Methods', field: 'Fields', file: 'Files', folder: 'Folders' };
+  const browseTypeMap = { class: 'Class', interface: 'Interface', method: 'Method', field: 'Field', file: 'File', folder: 'Folder' };
+  const browseType = browseTypeMap[key];
+  const label = labelMap[key];
+  if (!browseType) return;
+
+  detail.innerHTML = '<li class="loading">Loading...</li>';
+
+  (async () => {
+    const data = await api(`/api/browse?type=${encodeURIComponent(browseType)}&page=1&limit=50`);
+    if (!data) return;
+
+    const uid = 'ov-filter-' + Date.now();
+    let html = `<h3 style="font-size:15px;margin-bottom:8px;color:var(--text2)">${label} (${data.total})</h3>`;
+    html += `<input id="${uid}" class="browse-search" placeholder="Filter by name or path..." style="margin-bottom:12px" />`;
+    html += `<ul id="${uid}-list" class="result-list"></ul>`;
+    if (data.total > 50) {
+      html += `<p style="color:var(--text2);font-size:13px;margin-top:8px">Showing 50 of ${data.total} — switch to Browse page for full list</p>`;
+    }
+    detail.innerHTML = html;
+
+    const allItems = data.items;
+    const listEl = $(`#${uid}-list`);
+
+    function render(keyword) {
+      const kw = (keyword || '').trim().toLowerCase();
+      const filtered = kw ? allItems.filter(it => (it.name || '').toLowerCase().includes(kw) || (it.filePath || '').toLowerCase().includes(kw)) : allItems;
+      listEl.innerHTML = filtered.length ? filtered.map(item => {
+        const path = item.filePath || '';
+        const line = item.startLine ? `:${item.startLine}` : '';
+        return `<li class="result-item"><div class="type">${item.nodeType || browseType}</div><div class="name">${item.name}</div><div class="path">${path}${line}</div></li>`;
+      }).join('') : '<li class="loading">No items match</li>';
+    }
+
+    render('');
+    $(`#${uid}`).addEventListener('input', e => render(e.target.value));
+  })();
+}
+
+function showRelationsCard(relations) {
+  const detail = $('#overview-detail');
+  const entries = Object.entries(relations).sort((a, b) => b[1] - a[1]);
+  const uid = 'ov-filter-' + Date.now();
+  let html = `<h3 style="font-size:15px;margin-bottom:8px;color:var(--text2)">Relations (${entries.length})</h3>`;
+  html += `<input id="${uid}" class="browse-search" placeholder="Filter by relation type..." style="margin-bottom:12px" />`;
+  html += `<div id="${uid}-list"></div>`;
+  detail.innerHTML = html;
+
+  function render(keyword) {
+    const kw = (keyword || '').trim().toLowerCase();
+    const filtered = kw ? entries.filter(([t]) => t.toLowerCase().includes(kw)) : entries;
+    let h = '<table class="rel-table"><thead><tr><th>Type</th><th>Count</th></tr></thead><tbody>';
+    filtered.forEach(([type, cnt]) => {
+      h += `<tr><td>${type}</td><td>${fmt(cnt)}</td></tr>`;
+    });
+    h += '</tbody></table>';
+    $(`${uid}-list`).innerHTML = filtered.length ? h : '<p style="color:var(--text2)">No relations match</p>';
+  }
+
+  render('');
+  $(`#${uid}`).addEventListener('input', e => render(e.target.value));
+}
+
+function showTablesList() {
+  const detail = $('#overview-detail');
+  const dbInfo = overviewDbInfo;
+  if (!dbInfo?.tables?.length) { detail.innerHTML = '<p style="color:var(--text2)">No tables found</p>'; return; }
+
+  const jpaTables = dbInfo.tables.filter(t => t.source === 'jpa');
+  const mybatisTables = dbInfo.tables.filter(t => t.source === 'mybatis');
+  const allTables = [...jpaTables, ...mybatisTables];
+
+  const uid = 'ov-filter-' + Date.now();
+  let html = `<h3 style="font-size:15px;margin-bottom:8px;color:var(--text2)">Database Tables (${allTables.length})</h3>`;
+  html += `<input id="${uid}" class="browse-search" placeholder="Filter by table name or class..." style="margin-bottom:12px" />`;
+  html += `<div id="${uid}-list"></div>`;
+  detail.innerHTML = html;
+
+  function render(keyword) {
+    const kw = (keyword || '').trim().toLowerCase();
+    const filtered = kw ? allTables.filter(t => (t.tableName || '').toLowerCase().includes(kw) || (t.className || '').toLowerCase().includes(kw)) : allTables;
+    const fJpa = filtered.filter(t => t.source === 'jpa');
+    const fMy = filtered.filter(t => t.source === 'mybatis');
+    let h = '';
+    if (fJpa.length > 0) {
+      h += '<table class="rel-table" style="margin-bottom:16px"><thead><tr><th>Table Name</th><th>Entity Class</th><th>File</th></tr></thead><tbody>';
+      for (const t of fJpa) {
+        h += `<tr><td style="color:var(--cyan);font-family:monospace">${t.tableName}</td><td>${t.className}</td><td style="color:var(--text2);font-size:12px">${t.filePath?.split('/').pop() || ''}</td></tr>`;
+      }
+      h += '</tbody></table>';
+    }
+    if (fMy.length > 0) {
+      h += `<h4 style="font-size:13px;margin-bottom:8px;color:var(--text2)">MyBatis (${fMy.length})</h4>`;
+      h += '<table class="rel-table"><thead><tr><th>Table Name</th><th>Mapper</th></tr></thead><tbody>';
+      for (const t of fMy) {
+        h += `<tr><td style="color:var(--cyan);font-family:monospace">${t.tableName}</td><td>${t.className}</td></tr>`;
+      }
+      h += '</tbody></table>';
+    }
+    $(`${uid}-list`).innerHTML = h || '<p style="color:var(--text2)">No tables match</p>';
+  }
+
+  render('');
+  $(`#${uid}`).addEventListener('input', e => render(e.target.value));
+}
+
+function showModelsList() {
+  const detail = $('#overview-detail');
+  const models = overviewDbInfo?.models || [];
+  if (!models.length) { detail.innerHTML = '<p style="color:var(--text2)">No models found</p>'; return; }
+
+  const uid = 'ov-filter-' + Date.now();
+  let html = `<h3 style="font-size:15px;margin-bottom:8px;color:var(--text2)">Model Classes (${models.length})</h3>`;
+  html += `<input id="${uid}" class="browse-search" placeholder="Filter by name..." style="margin-bottom:12px" />`;
+  html += `<div id="${uid}-list"></div>`;
+  detail.innerHTML = html;
+
+  function render(keyword) {
+    const kw = (keyword || '').trim().toLowerCase();
+    const filtered = kw ? models.filter(m => (m.name || '').toLowerCase().includes(kw)) : models;
+    let h = '<table class="rel-table"><thead><tr><th>Name</th><th>File</th></tr></thead><tbody>';
+    filtered.forEach(m => {
+      h += `<tr><td style="font-family:monospace">${m.name}</td><td style="color:var(--text2);font-size:12px">${m.filePath?.split('/').pop() || ''}</td></tr>`;
+    });
+    h += '</tbody></table>';
+    $(`${uid}-list`).innerHTML = filtered.length ? h : '<p style="color:var(--text2)">No models match</p>';
+  }
+
+  render('');
+  $(`#${uid}`).addEventListener('input', e => render(e.target.value));
+}
+
+function showReposList() {
+  const detail = $('#overview-detail');
+  const repos = overviewDbInfo?.repositories || [];
+  if (!repos.length) { detail.innerHTML = '<p style="color:var(--text2)">No repositories found</p>'; return; }
+
+  const uid = 'ov-filter-' + Date.now();
+  let html = `<h3 style="font-size:15px;margin-bottom:8px;color:var(--text2)">Repositories (${repos.length})</h3>`;
+  html += `<input id="${uid}" class="browse-search" placeholder="Filter by name..." style="margin-bottom:12px" />`;
+  html += `<div id="${uid}-list"></div>`;
+  detail.innerHTML = html;
+
+  function render(keyword) {
+    const kw = (keyword || '').trim().toLowerCase();
+    const filtered = kw ? repos.filter(r => (r.name || '').toLowerCase().includes(kw)) : repos;
+    let h = '<table class="rel-table"><thead><tr><th>Name</th></tr></thead><tbody>';
+    filtered.forEach(r => {
+      h += `<tr><td style="font-family:monospace">${r.name}</td></tr>`;
+    });
+    h += '</tbody></table>';
+    $(`${uid}-list`).innerHTML = filtered.length ? h : '<p style="color:var(--text2)">No repositories match</p>';
+  }
+
+  render('');
+  $(`#${uid}`).addEventListener('input', e => render(e.target.value));
+}
+
+function showTransactionalList() {
+  const detail = $('#overview-detail');
+  const items = overviewDbInfo?.transactional || [];
+  if (!items.length) { detail.innerHTML = '<p style="color:var(--text2)">No transactional classes found</p>'; return; }
+
+  const uid = 'ov-filter-' + Date.now();
+  let html = `<h3 style="font-size:15px;margin-bottom:8px;color:var(--text2)">Transactional Classes (${items.length})</h3>`;
+  html += `<input id="${uid}" class="browse-search" placeholder="Filter by name..." style="margin-bottom:12px" />`;
+  html += `<div id="${uid}-list"></div>`;
+  detail.innerHTML = html;
+
+  function render(keyword) {
+    const kw = (keyword || '').trim().toLowerCase();
+    const filtered = kw ? items.filter(t => (t.name || '').toLowerCase().includes(kw)) : items;
+    let h = '<table class="rel-table"><thead><tr><th>Name</th></tr></thead><tbody>';
+    filtered.forEach(t => {
+      h += `<tr><td style="font-family:monospace">${t.name}</td></tr>`;
+    });
+    h += '</tbody></table>';
+    $(`${uid}-list`).innerHTML = filtered.length ? h : '<p style="color:var(--text2)">No classes match</p>';
+  }
+
+  render('');
+  $(`#${uid}`).addEventListener('input', e => render(e.target.value));
+}
+
+// ── Symbol Search ──
+$('#search-btn').addEventListener('click', doSearch);
+$('#search-input').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+
+async function doSearch() {
+  const q = $('#search-input').value.trim();
+  if (!q) return;
+  const results = await api(`/api/query?q=${encodeURIComponent(q)}`);
+  if (!results) return;
+  const ul = $('#search-results');
+  ul.innerHTML = '';
+  if (results.length === 0) { ul.innerHTML = '<li class="loading">No results found</li>'; return; }
+  results.forEach(r => {
+    const li = document.createElement('li');
+    li.className = 'result-item';
+    const tp = r.types || 'unknown';
+    const path = r.filePath || '';
+    const line = r.startLine ? `:${r.startLine}` : '';
+    // For methods, use full qualified name (Class.method) for better mindmap queries
+    const fullName = r.className && tp === 'Method' ? `${r.className}.${r.name}` : r.name;
+    li.innerHTML = `<div class="type">${tp}</div><div class="name">${r.name}</div><div class="path">${path}${line}</div>`;
+    li.addEventListener('click', () => showSymbolDetail(fullName, r.name));
+    ul.appendChild(li);
+  });
+}
+
+async function showSymbolDetail(fullName, shortName) {
+  const name = shortName || fullName;
+  const ctx = await api(`/api/symbol?name=${encodeURIComponent(name)}`);
+  if (!ctx) return;
+  const el = $('#symbol-detail');
+  el.style.display = 'block';
+  el.innerHTML = `<h3>Context: ${name}</h3>`;
+
+  const renderList = (items, prefix, key, clsKey) => {
+    if (!items || items.length === 0) return `<div class="item">(none)</div>`;
+    return items.map(c => {
+      const full = c[clsKey] ? `${c[clsKey]}.${c[key]}` : c[key];
+      const conf = c.confidence != null ? ` (${Number(c.confidence).toFixed(2)})` : '';
+      return `<div class="item">${prefix} ${full}${conf}</div>`;
+    }).join('');
+  };
+
+  const renderTreeList = (items, prefix, key, clsKey, depth) => {
+    if (!items || items.length === 0) return `<div class="item" style="padding-left:${8 + depth * 16}px">(none)</div>`;
+    return items.map(c => {
+      const full = c[clsKey] ? `${c[clsKey]}.${c[key]}` : c[key];
+      const conf = c.confidence != null ? ` (${Number(c.confidence).toFixed(2)})` : '';
+      const relType = c.relType ? `<span style="font-size:10px;color:var(--cyan);margin-left:4px">[${c.relType}]</span>` : '';
+      let h = `<div class="item" style="padding-left:${8 + depth * 16}px;border-left-color:${depth > 0 ? 'var(--cyan)' : 'var(--border)'}">${prefix} ${full}${conf}${relType}</div>`;
+      if (c.children && c.children.length > 0) {
+        h += renderTreeList(c.children, prefix === '-' ? '↳' : '↳', key, clsKey, depth + 1);
+      }
+      return h;
+    }).join('');
+  };
+
+  // For Method nodes, render mindmap FIRST (primary view)
+  if (ctx.callers !== undefined || ctx.callees !== undefined) {
+    const mindmapData = await api(`/api/mindmap?target=${encodeURIComponent(fullName)}`);
+    if (mindmapData && (mindmapData.upstream?.length || mindmapData.downstream?.length)) {
+      const uid = 'mindmap-' + Date.now();
+      el.innerHTML += `<div class="mindmap-container" id="${uid}-container">
+        <div class="mindmap-title-bar">
+          <span class="mindmap-title">Call Chain Mindmap</span>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="font-size:11px;color:var(--text2)">滚轮缩放 · 拖拽平移</span>
+            <button class="mindmap-fullscreen-btn" onclick="openMindmapFullscreen('${uid}')">⛶ 全屏</button>
+          </div>
+        </div>
+        <div id="${uid}" class="mindmap-canvas"></div>
+      </div>`;
+      // Store raw data for rendering + fullscreen
+      window._mindmapTrees = window._mindmapTrees || {};
+      window._mindmapTrees[uid] = mindmapData;
+      window._mindmapTrees[uid + '-target'] = fullName;
+      // Render unified bidirectional mindmap
+      renderMindmapPanels(uid);
+    }
+  }
+
+  // Callers/Callees hierarchical lists below mindmap
+  el.innerHTML += `
+    <div class="detail-group"><h4>Callers (${ctx.callers.length})</h4>${renderTreeList(ctx.callers, '-', 'caller', 'callerClass', 0)}</div>
+    <div class="detail-group"><h4>Callees (${ctx.callees.length})</h4>${renderTreeList(ctx.callees, '→', 'callee', 'calleeClass', 0)}</div>
+  `;
+
+  // For Field nodes, show ACCESSES
+  if (ctx.accesses && ctx.accesses.length > 0) {
+    el.innerHTML += `<div class="detail-group"><h4>Accessed By (${ctx.accesses.length})</h4>${renderList(ctx.accesses, '-', 'accessor', 'accessorClass')}</div>`;
+  }
+}
+
+// ── Mindmap Bidirectional Tree Renderer ──
+function renderMindmapPanels(uid) {
+  const data = window._mindmapTrees?.[uid];
+  if (!data) return;
+
+  const container = document.getElementById(uid);
+  if (!container) return;
+
+  const UP_COLOR = '#f472b6';
+  const DOWN_COLOR = '#34d399';
+  const ROOT_COLOR = '#a78bfa';
+
+  // Compute layout
+  const NODE_H = 28;
+  const NODE_GAP = 6;
+  const H_SPACING = 220;
+  const PADDING_X = 60;
+  const PADDING_Y = 30;
+
+  function subtreeHeight(nodes) {
+    if (!nodes || !nodes.length) return NODE_H;
+    let total = 0;
+    nodes.forEach((n, i) => {
+      const childH = subtreeHeight(n.children || []);
+      total += Math.max(childH, NODE_H);
+      if (i < nodes.length - 1) total += NODE_GAP;
+    });
+    return total;
+  }
+
+  // Assign positions recursively
+  const upNodes = data.upstream || [];
+  const downNodes = data.downstream || [];
+  const totalH = Math.max(subtreeHeight(upNodes), subtreeHeight(downNodes), NODE_H) + PADDING_Y * 2;
+  const canvasH = Math.max(totalH, 300);
+  const centerY = canvasH / 2;
+
+  const nodes = []; // { name, x, y, depth, side }
+  const links = []; // { fromX, fromY, toX, toY, side }
+
+  // Root at center
+  const rootX = PADDING_X + (upNodes.length > 0 ? H_SPACING : 0);
+  nodes.push({ name: data.root, x: rootX, y: centerY, depth: 0, side: 'root' });
+
+  // Recursive layout for a list of nodes at a given position
+  function layoutNodes(nList, parentX, parentY, side, startX, depth) {
+    let y = startX;
+    nList.forEach(n => {
+      const childH = subtreeHeight(n.children || []);
+      const nH = Math.max(childH, NODE_H);
+      const nodeY = y + nH / 2;
+      // Top-level nodes go outward from root; nested children go inward (closer to root)
+      const outward = side === 'up' ? -H_SPACING : H_SPACING;
+      const nodeX = parentX + (depth <= 1 ? outward : -outward);
+      nodes.push({ name: n.name, x: nodeX, y: nodeY, depth: depth || 1, side });
+      links.push({ fromX: parentX, fromY: parentY, toX: nodeX, toY: nodeY, side });
+      if (n.children && n.children.length > 0) {
+        layoutNodes(n.children, nodeX, nodeY, side, y, (depth || 1) + 1);
+      }
+      y += nH + NODE_GAP;
+    });
+  }
+
+  if (upNodes.length > 0) {
+    const upTotal = subtreeHeight(upNodes);
+    const upStart = centerY - upTotal / 2;
+    layoutNodes(upNodes, rootX, centerY, 'up', upStart, 1);
+  }
+
+  if (downNodes.length > 0) {
+    const downTotal = subtreeHeight(downNodes);
+    const downStart = centerY - downTotal / 2;
+    layoutNodes(downNodes, rootX, centerY, 'down', downStart, 1);
+  }
+
+  const maxX = Math.max(...nodes.map(n => n.x));
+  const canvasW = Math.max(maxX + PADDING_X + 40, 600);
+
+  // ── SVG wrapper with pan/zoom ──
+  container.innerHTML = '';
+  // Container handles scrolling via max-height + overflow: auto
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('width', canvasW);
+  svg.setAttribute('height', canvasH);
+  svg.setAttribute('viewBox', `0 0 ${canvasW} ${canvasH}`);
+  svg.style.display = 'block';
+  // Inner group that gets pan/zoom transforms
+  const content = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  content.setAttribute('class', 'mindmap-content');
+  svg.appendChild(content);
+
+  // Pan state
+  let isDragging = false;
+  let dragStartX = 0, dragStartY = 0;
+  let dragScrollLeft = 0, dragScrollTop = 0;
+
+  container.addEventListener('mousedown', (e) => {
+    // Only drag on empty area, not on nodes
+    if (e.target.closest('.mindmap-node')) return;
+    isDragging = true;
+    container.classList.add('dragging');
+    dragStartX = e.clientX;
+    dragStartY = e.clientY;
+    dragScrollLeft = container.scrollLeft;
+    dragScrollTop = container.scrollTop;
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!isDragging) return;
+    const dx = e.clientX - dragStartX;
+    const dy = e.clientY - dragStartY;
+    container.scrollLeft = dragScrollLeft - dx;
+    container.scrollTop = dragScrollTop - dy;
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (isDragging) {
+      isDragging = false;
+      container.classList.remove('dragging');
+    }
+  });
+
+  // Wheel zoom
+  container.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const zoomFactor = e.deltaY > 0 ? 0.95 : 1.05;
+    const vb = svg.getAttribute('viewBox').split(' ').map(Number);
+    const [vx, vy, vw, vh] = vb;
+    const newW = Math.max(100, Math.min(vw * 3, vw / zoomFactor));
+    const newH = Math.max(100, Math.min(vh * 3, vh / zoomFactor));
+    // Zoom toward mouse position within container
+    const rect = container.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) / rect.width;
+    const my = (e.clientY - rect.top) / rect.height;
+    const nx = vx + mx * (vw - newW);
+    const ny = vy + my * (vh - newH);
+    svg.setAttribute('viewBox', `${nx} ${ny} ${newW} ${newH}`);
+  }, { passive: false });
+
+  // Defs
+  const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+  const filter = document.createElementNS('http://www.w3.org/2000/svg', 'filter');
+  filter.setAttribute('id', 'nodeGlow-' + uid);
+  const blur = document.createElementNS('http://www.w3.org/2000/svg', 'feGaussianBlur');
+  blur.setAttribute('stdDeviation', '3');
+  blur.setAttribute('result', 'coloredBlur');
+  filter.appendChild(blur);
+  const merge = document.createElementNS('http://www.w3.org/2000/svg', 'feMerge');
+  const mn1 = document.createElementNS('http://www.w3.org/2000/svg', 'feMergeNode');
+  mn1.setAttribute('in', 'coloredBlur');
+  merge.appendChild(mn1);
+  const mn2 = document.createElementNS('http://www.w3.org/2000/svg', 'feMergeNode');
+  mn2.setAttribute('in', 'SourceGraphic');
+  merge.appendChild(mn2);
+  filter.appendChild(merge);
+  defs.appendChild(filter);
+  svg.appendChild(defs);
+
+  // Links layer
+  const linksG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  linksG.setAttribute('class', 'links');
+  links.forEach(l => {
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    const color = l.side === 'up' ? UP_COLOR : DOWN_COLOR;
+    const midX = l.fromX + (l.toX - l.fromX) * 0.4;
+    path.setAttribute('d', `M${l.fromX},${l.fromY} C${midX},${l.fromY} ${midX},${l.toY} ${l.toX},${l.toY}`);
+    path.setAttribute('stroke', color);
+    path.setAttribute('stroke-width', '2.5');
+    path.setAttribute('fill', 'none');
+    path.setAttribute('stroke-opacity', '0.7');
+    linksG.appendChild(path);
+  });
+  content.appendChild(linksG);
+
+  // Nodes layer
+  const nodesG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  nodesG.setAttribute('class', 'nodes');
+
+  nodes.forEach(n => {
+    const color = n.side === 'up' ? UP_COLOR : n.side === 'down' ? DOWN_COLOR : ROOT_COLOR;
+    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    g.setAttribute('class', 'mindmap-node');
+    g.setAttribute('cursor', n.side !== 'root' ? 'pointer' : 'default');
+    g.setAttribute('transform', `translate(${n.x}, ${n.y})`);
+
+    const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    const nodeW = Math.max(n.name.length * 8.5 + 24, 80);
+    rect.setAttribute('x', -nodeW / 2);
+    rect.setAttribute('y', -NODE_H / 2);
+    rect.setAttribute('width', nodeW);
+    rect.setAttribute('height', NODE_H);
+    rect.setAttribute('rx', '6');
+    rect.setAttribute('fill', '#1a1d27');
+    rect.setAttribute('stroke', color);
+    rect.setAttribute('stroke-width', '1.5');
+    rect.setAttribute('stroke-opacity', '0.7');
+    g.appendChild(rect);
+
+    const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    circle.setAttribute('cx', -nodeW / 2 - 5);
+    circle.setAttribute('cy', '0');
+    circle.setAttribute('r', '4');
+    circle.setAttribute('fill', color);
+    circle.setAttribute('opacity', '0.9');
+    g.appendChild(circle);
+
+    const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    text.setAttribute('text-anchor', 'middle');
+    text.setAttribute('dy', '0.35em');
+    text.setAttribute('fill', '#e2e8f0');
+    text.setAttribute('font-family', "'SF Mono', 'Fira Code', 'Consolas', monospace");
+    text.setAttribute('font-size', '12.5');
+    text.setAttribute('font-weight', '500');
+    text.textContent = n.name;
+    g.appendChild(text);
+
+    if (n.side !== 'root') {
+      g.addEventListener('click', (e) => {
+        e.stopPropagation();
+        showSymbolDetail(n.name, n.name.split('.').pop());
+      });
+      g.style.cursor = 'pointer';
+    }
+
+    nodesG.appendChild(g);
+  });
+  content.appendChild(nodesG);
+
+  container.appendChild(svg);
+}
+
+// ── Mindmap Fullscreen ──
+function openMindmapFullscreen(uid) {
+  const data = window._mindmapTrees?.[uid];
+  if (!data) return;
+  const overlay = document.getElementById('mindmap-overlay');
+  const title = document.getElementById('mindmap-overlay-title');
+  const body = document.getElementById('mindmap-overlay-body');
+  title.textContent = `Call Chain Mindmap — ${data.root}`;
+
+  // Create a temporary container for fullscreen rendering
+  const fsUid = 'mindmap-fs-' + Date.now();
+  body.innerHTML = `<div id="${fsUid}" class="mindmap-canvas" style="min-height:85vh"></div>`;
+  overlay.classList.add('active');
+
+  // Store data for fullscreen rendering
+  window._mindmapTrees = window._mindmapTrees || {};
+  window._mindmapTrees[fsUid] = data;
+
+  requestAnimationFrame(() => {
+    renderMindmapPanels(fsUid);
+  });
+}
+
+function closeMindmapFullscreen() {
+  document.getElementById('mindmap-overlay').classList.remove('active');
+}
+
+// Esc key to close fullscreen
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeMindmapFullscreen();
+});
+
+// ── Browse All ──
+let browseState = { type: 'Class', page: 1, limit: 50, keyword: '' };
+
+async function loadBrowse() {
+  const { type, page, limit, keyword } = browseState;
+  const el = $('#browse-list');
+  el.innerHTML = '<li class="loading">Loading...</li>';
+  const kwParam = keyword ? `&keyword=${encodeURIComponent(keyword)}` : '';
+  const data = await api(`/api/browse?type=${encodeURIComponent(type)}&page=${page}&limit=${limit}${kwParam}`);
+  if (!data) return;
+  el.innerHTML = '';
+  if (data.items.length === 0) { el.innerHTML = '<li class="loading">No items found</li>'; }
+  data.items.forEach(item => {
+    const li = document.createElement('li');
+    li.className = 'result-item';
+    const tp = item.nodeType || type;
+    const path = item.filePath || '';
+    const line = item.startLine ? `:${item.startLine}` : '';
+    li.innerHTML = `<div class="type">${tp}</div><div class="name">${item.name}</div><div class="path">${path}${line}</div>`;
+    if (item.name) {
+      const fullName = item.className && (tp === 'Method' || tp === 'Field') ? `${item.className}.${item.name}` : item.name;
+      li.addEventListener('click', () => showSymbolDetail(fullName, item.name));
+    }
+    el.appendChild(li);
+  });
+  // Pagination
+  $('#browse-info').textContent = `${data.total} total, page ${data.page}/${data.total_pages}`;
+  $('#browse-page').textContent = `${data.page}/${data.total_pages}`;
+  $('#browse-prev').disabled = data.page <= 1;
+  $('#browse-next').disabled = data.page >= data.total_pages;
+}
+
+document.querySelectorAll('.browse-tab').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.browse-tab').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    browseState.type = btn.dataset.type;
+    browseState.page = 1;
+    loadBrowse();
+  });
+});
+
+// Search input with debounce
+let browseSearchTimer;
+$('#browse-search').addEventListener('input', e => {
+  clearTimeout(browseSearchTimer);
+  browseSearchTimer = setTimeout(() => {
+    browseState.keyword = e.target.value.trim();
+    browseState.page = 1;
+    loadBrowse();
+  }, 300);
+});
+
+$('#browse-prev').addEventListener('click', () => { if (browseState.page > 1) { browseState.page--; loadBrowse(); } });
+$('#browse-next').addEventListener('click', () => { browseState.page++; loadBrowse(); });
+
+// ── Cypher Query Builder ──
+$('#qb-generate').addEventListener('click', () => {
+  const nodeType = $('#qb-node-type').value;
+  const field = $('#qb-field').value || 'name';
+  const rel = $('#qb-rel').value;
+  const direction = $('#qb-direction').value;
+
+  let q = '';
+  if (!nodeType && !rel) {
+    q = 'MATCH (n) RETURN labels(n) AS type, count(n) AS cnt ORDER BY cnt DESC';
+  } else if (rel && nodeType && direction === 'outgoing') {
+    q = `MATCH (n:${nodeType})-[r:${rel}]->(m) RETURN n.${field} AS src, m.name AS target, r.type AS relType ORDER BY src`;
+  } else if (rel && nodeType && direction === 'incoming') {
+    q = `MATCH (m)-[r:${rel}]->(n:${nodeType}) RETURN n.${field} AS target, m.name AS src, r.type AS relType ORDER BY target`;
+  } else if (rel && !nodeType) {
+    q = `MATCH (a)-[r:${rel}]->(b) RETURN a.name AS src, b.name AS target, r.type AS relType ORDER BY src LIMIT 50`;
+  } else if (nodeType && direction === 'outgoing') {
+    q = `MATCH (n:${nodeType})-[r:CodeRelation]->(m) RETURN n.${field} AS src, m.name AS target, r.type AS relType ORDER BY src LIMIT 50`;
+  } else if (nodeType && direction === 'incoming') {
+    q = `MATCH (m)-[r:CodeRelation]->(n:${nodeType}) RETURN n.${field} AS target, m.name AS src, r.type AS relType ORDER BY target LIMIT 50`;
+  } else if (nodeType) {
+    q = `MATCH (n:${nodeType}) RETURN n.${field}, n.filePath ORDER BY n.${field}`;
+  }
+
+  $('#cypher-input').value = q;
+});
+
+$('#qb-clear').addEventListener('click', () => {
+  $('#qb-node-type').value = '';
+  $('#qb-field').value = '';
+  $('#qb-rel').value = '';
+  $('#qb-direction').value = '';
+  $('#cypher-input').value = '';
+  $('#cypher-results').innerHTML = '';
+});
+
+document.querySelectorAll('.preset-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    $('#cypher-input').value = btn.dataset.q;
+  });
+});
+
+// ── Cypher Editor ──
+$('#cypher-run').addEventListener('click', doCypher);
+$('#cypher-input').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); doCypher(); }});
+
+async function doCypher() {
+  const q = $('#cypher-input').value.trim();
+  if (!q) return;
+  const results = await api('/api/cypher', { method: 'POST', body: JSON.stringify({ query: q }) });
+  if (!results) return;
+  const el = $('#cypher-results');
+  if (results.length === 0) { el.innerHTML = '<p class="loading">(no results)</p>'; return; }
+  const keys = Object.keys(results[0]);
+  let html = '<table><thead><tr>';
+  keys.forEach(k => { html += `<th>${k}</th>`; });
+  html += '</tr></thead><tbody>';
+  results.forEach(row => {
+    html += '<tr>';
+    keys.forEach(k => {
+      let v = row[k];
+      if (typeof v === 'object') v = JSON.stringify(v);
+      html += `<td title="${String(v).replace(/"/g, '&quot;')}">${String(v).substring(0, 200)}</td>`;
+    });
+    html += '</tr>';
+  });
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
+// ── Impact Analysis ──
+$('#impact-run').addEventListener('click', doImpact);
+
+async function doImpact() {
+  const target = $('#impact-target').value.trim();
+  if (!target) return;
+  const dir = $('#impact-direction').value;
+  const depth = $('#impact-depth').value;
+  const el = $('#impact-results');
+  el.innerHTML = '<p class="loading">Analyzing...</p>';
+  const result = await api(`/api/impact?target=${encodeURIComponent(target)}&direction=${dir}&depth=${depth}`);
+  if (!result) return;
+
+  const riskClass = `risk-${result.risk}`;
+  let html = `<div style="margin-bottom:16px">Risk: <span class="risk-badge ${riskClass}">${result.risk}</span> &nbsp; ${result.summary.total_affected} symbols affected, ${result.summary.direct_dependents} direct</div>`;
+
+  // Handle "both" direction (upstream + downstream)
+  if (dir === 'both') {
+    const renderDirection = (title, data) => {
+      let h = `<div class="impact-depth" style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px">
+        <h4 style="color:var(--cyan);font-size:15px;margin-bottom:12px">${title} (${data.summary.total_affected} symbols)</h4>`;
+      for (const [depthKey, items] of Object.entries(data.byDepth)) {
+        const label = { 'd=1': 'WILL BREAK', 'd=2': 'LIKELY AFFECTED', 'd=3': 'MAY NEED TESTING' }[depthKey] || depthKey;
+        h += `<div style="margin-bottom:8px"><strong style="font-size:12px;color:var(--accent)">${depthKey} (${label})</strong></div>`;
+        items.slice(0, 30).forEach(item => {
+          const full = `${item.type || ''}:${item.name}`;
+          const fp = item.filePath ? ` at ${item.filePath}` : '';
+          h += `<div class="item">- ${full} via ${item.relationType} (conf: ${item.confidence.toFixed(2)})${fp}</div>`;
+        });
+        if (items.length > 30) h += `<div class="item">... and ${items.length - 30} more</div>`;
+      }
+      h += '</div>';
+      return h;
+    };
+    html += renderDirection('↑ Upstream（上游调用者）', result.upstream);
+    html += renderDirection('↓ Downstream（下游被调用者）', result.downstream);
+  } else {
+    for (const [depthKey, items] of Object.entries(result.byDepth)) {
+      const label = { 'd=1': 'WILL BREAK', 'd=2': 'LIKELY AFFECTED', 'd=3': 'MAY NEED TESTING' }[depthKey] || depthKey;
+      html += `<div class="impact-depth"><h4>${depthKey} (${label}, ${items.length} symbols)</h4>`;
+      items.slice(0, 30).forEach(item => {
+        const full = `${item.type || ''}:${item.name}`;
+        const fp = item.filePath ? ` at ${item.filePath}` : '';
+        html += `<div class="item">- ${full} via ${item.relationType} (conf: ${item.confidence.toFixed(2)})${fp}</div>`;
+      });
+      if (items.length > 30) html += `<div class="item">... and ${items.length - 30} more</div>`;
+      html += '</div>';
+    }
+  }
+  el.innerHTML = html;
+}
+
+// ── Database Chain ──
+let dbChainData = null;
+
+async function loadDbChain() {
+  const el = $('#dbchain-list');
+  el.innerHTML = '<p class="loading">Loading database chains...</p>';
+  const data = await api('/api/db-chain');
+  if (!data) return;
+  dbChainData = data;
+  renderDbChain(data);
+}
+
+function renderChainStep(label, name, cls) {
+  return `<div class="db-chain-step ${cls}"><span class="step-label">${label}</span><span class="step-name">${name}</span></div>`;
+}
+
+function renderDbChain(data) {
+  const el = $('#dbchain-list');
+  let html = '';
+
+  // 1. Tables
+  if (data.tables?.length > 0) {
+    html += `<div class="db-section-title">Database Tables (${data.tables.length})</div>`;
+    html += `<div class="db-tables">`;
+    data.tables.forEach(t => {
+      html += `<div class="db-table-card">
+        <div class="tbl-name">${t.name}</div>
+        <div class="tbl-class">${t.className}</div>
+      </div>`;
+    });
+    html += `</div>`;
+  }
+
+  // 2. Full chains
+  if (data.chains?.length > 0) {
+    html += `<div class="db-section-title">Full Call Chains (${data.chains.length})</div>`;
+    data.chains.forEach(c => {
+      html += `<div class="db-chain-row">
+        ${renderChainStep('Controller', `${c.controller}<br><small>${c.controllerMethod}()</small>`, 'step-ctrl')}
+        <span class="db-arrow">→</span>
+        ${renderChainStep('Service', `${c.service}<br><small>${c.serviceMethod}()</small>`, 'step-svc')}
+        <span class="db-arrow">→</span>
+        ${renderChainStep('Repository', `${c.repository}<br><small>${c.repoMethod}()</small>`, 'step-repo')}
+        <span class="db-arrow">→</span>
+        ${renderChainStep('Table', c.table || '?', 'step-table')}
+        <span class="db-orm-badge">${c.ormType}</span>
+        <span class="db-op-badge op-${c.operation}">${c.operation}</span>
+      </div>`;
+    });
+  }
+
+  // 3. Repository methods grouped by repository
+  if (data.repository_methods?.length > 0) {
+    const byRepo = {};
+    data.repository_methods.forEach(rm => {
+      byRepo[rm.repository] = byRepo[rm.repository] || [];
+      byRepo[rm.repository].push(rm);
+    });
+    html += `<div class="db-section-title">Repository Methods</div>`;
+    for (const [repo, methods] of Object.entries(byRepo)) {
+      html += `<div style="font-size:14px;font-weight:600;color:var(--orange);margin:12px 0 8px">${repo}</div>`;
+      methods.forEach(rm => {
+        html += `<div class="db-repo-method">
+          <div class="method-sig">${rm.method}() <span class="db-op-badge op-${rm.operation}">${rm.operation}</span></div>
+          <span class="method-sql">${rm.inferredSql}</span>
+        </div>`;
+      });
+    }
+  }
+
+  // 4. JdbcTemplate services
+  if (data.jdbcTemplate_services?.length > 0) {
+    html += `<div class="db-section-title">JdbcTemplate Services (${data.jdbcTemplate_services.length} services — SQL not captured)</div>`;
+    html += `<div>`;
+    data.jdbcTemplate_services.forEach(s => {
+      html += `<span class="db-jt-service">${s}</span>`;
+    });
+    html += `</div>`;
+  }
+
+  el.innerHTML = html || '<p class="loading">No database operations found</p>';
+}
+
+// ── Frontend Pages Mapping ──
+let frontendPagesData = null;
+
+async function loadFrontendPages() {
+  const el = $('#frontend-list');
+  el.innerHTML = '<p class="loading">Loading frontend pages mapping...</p>';
+  const data = await api('/api/frontend-pages');
+  if (!data) return;
+  frontendPagesData = data;
+  renderFrontendPages(data);
+}
+
+$('#frontend-load')?.addEventListener('click', async () => {
+  const path = $('#frontend-path')?.value?.trim() || '';
+  const el = $('#frontend-list');
+  el.innerHTML = '<p class="loading">Scanning frontend source files...</p>';
+  const qs = path ? `&frontendPath=${encodeURIComponent(path)}` : '';
+  const data = await api(`/api/frontend-pages?${qs}`);
+  if (!data) return;
+  frontendPagesData = data;
+  renderFrontendPages(data);
+});
+
+function renderFrontendPages(data) {
+  const el = $('#frontend-list');
+  const stats = $('#frontend-stats');
+
+  if (!data.apiCalls?.length && !data.totalApiCalls) {
+    stats.textContent = 'No API calls found. Provide a frontend source path to scan.';
+    el.innerHTML = `<p class="loading" style="color:var(--text2)">
+      未找到前端 API 调用。请在上方输入前端项目源码路径（如 /path/to/vue-app），系统将扫描
+      <code style="color:var(--cyan)">.vue</code>、<code style="color:var(--cyan)">.js</code>、
+      <code style="color:var(--cyan)">.ts</code> 文件中的 axios/fetch 调用，并与后端 HTTP 端点进行匹配。</p>`;
+    return;
+  }
+
+  stats.textContent = `${data.totalApiCalls || 0} API calls found, ${data.matchedApiCalls || 0} matched to backend endpoints`;
+
+  let html = '';
+
+  // Stats summary cards
+  html += `<div class="stats-grid" style="grid-template-columns: repeat(4, 1fr); margin-bottom: 20px;">
+    <div class="stat-card"><div class="num" style="color:var(--cyan)">${data.totalApiCalls || 0}</div><div class="label">Total API Calls</div></div>
+    <div class="stat-card"><div class="num" style="color:var(--green)">${data.matchedApiCalls || 0}</div><div class="label">Matched to Backend</div></div>
+    <div class="stat-card"><div class="num" style="color:var(--orange)">${data.unmatchedCalls || 0}</div><div class="label">Unmatched</div></div>
+    <div class="stat-card"><div class="num" style="color:var(--accent)">${data.routes?.length || 0}</div><div class="label">Vue Routes</div></div>
+  </div>`;
+
+  // Vue Routes (if any)
+  if (data.routes?.length > 0) {
+    html += `<div class="db-section-title">Vue Router Routes (${data.routes.length})</div>`;
+    html += `<table class="rel-table"><thead><tr><th>Path</th><th>Component</th><th>File</th><th>Line</th></tr></thead><tbody>`;
+    data.routes.forEach(r => {
+      html += `<tr><td style="color:var(--cyan);font-family:monospace">${r.path}</td>
+        <td>${r.component}</td>
+        <td style="color:var(--text2);font-size:12px">${r.file}</td>
+        <td style="color:var(--text2)">${r.line}</td></tr>`;
+    });
+    html += `</tbody></table>`;
+  }
+
+  // Matched API calls grouped by page
+  if (data.apiCalls?.length > 0) {
+    const byPage = {};
+    data.apiCalls.forEach(c => {
+      byPage[c.page] = byPage[c.page] || [];
+      byPage[c.page].push(c);
+    });
+
+    html += `<div class="db-section-title">Page → API → Backend Chains (${Object.keys(byPage).length} pages)</div>`;
+
+    for (const [page, calls] of Object.entries(byPage)) {
+      html += `<div class="arch-layer">
+        <div class="arch-layer-header" onclick="this.nextElementSibling.classList.toggle('open')">
+          <div><span class="layer-name" style="color:var(--cyan)">📱 ${page}</span></div>
+          <span class="layer-count">${calls.length} API call(s)</span>
+        </div>
+        <div class="arch-layer-body">`;
+
+      calls.forEach(c => {
+        // Build full chain: Page → API Call → Controller → (db-chain)
+        const chainSteps = [];
+        chainSteps.push(`<div class="db-chain-step step-ctrl"><span class="step-label">Page</span><span class="step-name">${page}</span></div>`);
+        chainSteps.push(`<span class="db-arrow">→</span>`);
+        chainSteps.push(`<div class="db-chain-step step-svc"><span class="step-label">API</span><span class="step-name"><span class="method-badge method-${c.httpMethod}" style="font-size:9px;padding:1px 6px">${c.httpMethod}</span> ${c.httpPath}</span></div>`);
+        chainSteps.push(`<span class="db-arrow">→</span>`);
+
+        if (c.controller) {
+          chainSteps.push(`<div class="db-chain-step step-ctrl"><span class="step-label">Controller</span><span class="step-name">${c.controller}.${c.controllerMethod || ''}()</span></div>`);
+
+          // Show linked service and tables from db-chain
+          if (c.linkedService) {
+            chainSteps.push(`<span class="db-arrow">→</span>`);
+            chainSteps.push(`<div class="db-chain-step step-svc"><span class="step-label">Service</span><span class="step-name">${c.linkedService}</span></div>`);
+          }
+          if (c.linkedTables?.length > 0) {
+            chainSteps.push(`<span class="db-arrow">→</span>`);
+            const tblHtml = c.linkedTables.map(t => `<span class="db-op-badge op-READ" style="font-size:9px">${t}</span>`).join(' ');
+            chainSteps.push(`<div class="db-chain-step step-table"><span class="step-label">Table</span><span class="step-name">${tblHtml}</span></div>`);
+          }
+        } else {
+          chainSteps.push(`<div class="db-chain-step"><span class="step-name" style="color:var(--red)">(no match)</span></div>`);
+        }
+
+        if (c.matchType === 'param') {
+          chainSteps.push(`<span style="font-size:10px;color:var(--orange)">~ param match</span>`);
+        }
+
+        html += `<div class="db-chain-row">${chainSteps.join('')}</div>`;
+      });
+
+      html += `</div></div>`;
+    }
+  }
+
+  el.innerHTML = html;
+}
+
+// ── Layered Architecture ──
+let archData = null;
+
+async function loadArchitecture() {
+  const el = $('#architecture-list');
+  el.innerHTML = '<p class="loading">Loading architecture...</p>';
+  const data = await api('/api/architecture');
+  if (!data) return;
+  archData = data;
+  renderArchitecture(data);
+}
+
+function renderArchitecture(data) {
+  const el = $('#architecture-list');
+  let html = '';
+
+  // Controller layer
+  html += `<div class="arch-layer">
+    <div class="arch-layer-header" onclick="this.nextElementSibling.classList.toggle('open')">
+      <div><span class="layer-name" style="color:var(--green)">🖥 Controller 层</span></div>
+      <span class="layer-count">${data.controllers.length} controllers</span>
+    </div>
+    <div class="arch-layer-body">${data.controllers.map(c =>
+      `<span class="arch-chip" title="${c.filePath || ''}">${c.name}</span>`
+    ).join('')}</div>
+  </div>`;
+
+  // Arrow
+  html += `<div class="arch-arrow">↓ 调用</div>`;
+
+  // Service layer
+  html += `<div class="arch-layer">
+    <div class="arch-layer-header" onclick="this.nextElementSibling.classList.toggle('open')">
+      <div><span class="layer-name" style="color:var(--cyan)">⚙ Service 层</span></div>
+      <span class="layer-count">${data.services.length} services</span>
+    </div>
+    <div class="arch-layer-body">${data.services.map(s =>
+      `<span class="arch-chip">${s.name}</span>`
+    ).join('')}</div>
+  </div>`;
+
+  // Arrow
+  if (data.repositories.length > 0) {
+    html += `<div class="arch-arrow">↓ 调用</div>`;
+
+    // Repository layer
+    html += `<div class="arch-layer">
+      <div class="arch-layer-header" onclick="this.nextElementSibling.classList.toggle('open')">
+        <div><span class="layer-name" style="color:var(--orange)">🗄 Repository 层</span></div>
+        <span class="layer-count">${data.repositories.length} repositories</span>
+      </div>
+      <div class="arch-layer-body">${data.repositories.map(r =>
+        `<span class="arch-chip">${r.name}</span>`
+      ).join('')}</div>
+    </div>`;
+  }
+
+  // Call relationships
+  if (data.controller_to_service.length > 0) {
+    html += `<div style="margin-top:20px">
+      <h3 style="font-size:14px;color:var(--text2);margin-bottom:12px">Controller → Service 调用关系 Top 20</h3>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px">`;
+    data.controller_to_service.slice(0, 20).forEach(call => {
+      html += `<div class="arch-call-row">
+        <span style="color:var(--green)">${call.src}</span>
+        <span class="arrow">→</span>
+        <span style="color:var(--cyan)">${call.target}</span>
+        <span class="call-count">${call.cnt} calls</span>
+      </div>`;
+    });
+    html += `</div></div>`;
+  }
+
+  if (data.service_to_repository.length > 0) {
+    html += `<div style="margin-top:16px">
+      <h3 style="font-size:14px;color:var(--text2);margin-bottom:12px">Service → Repository 调用关系</h3>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px">`;
+    data.service_to_repository.forEach(call => {
+      html += `<div class="arch-call-row">
+        <span style="color:var(--cyan)">${call.src}</span>
+        <span class="arrow">→</span>
+        <span style="color:var(--orange)">${call.target}</span>
+        <span class="call-count">${call.cnt} calls</span>
+      </div>`;
+    });
+    html += `</div></div>`;
+  }
+
+  el.innerHTML = html;
+}
+
+// ── Scheduled Tasks ──
+let scheduledData = [];
+
+function formatInterval(ms) {
+  if (!ms) return '';
+  const num = parseInt(ms);
+  if (!num) return ms;
+  if (num >= 3600000) return `${(num / 3600000).toFixed(1)}h`;
+  if (num >= 60000) return `${(num / 60000).toFixed(0)}min`;
+  if (num >= 1000) return `${(num / 1000).toFixed(0)}s`;
+  return `${num}ms`;
+}
+
+async function loadScheduled() {
+  const el = $('#scheduled-list');
+  el.innerHTML = '<p class="loading">Loading scheduled tasks...</p>';
+  const data = await api('/api/scheduled');
+  if (!data) return;
+  scheduledData = data;
+  renderScheduled(data);
+}
+
+function renderScheduled(data) {
+  const el = $('#scheduled-list');
+  const filter = ($('#scheduled-filter')?.value || '').toLowerCase();
+  const typeFilter = $('#scheduled-type-filter')?.value || '';
+
+  let html = '';
+  let count = 0;
+  data.forEach(task => {
+    const matchFilter = !filter ||
+      task.methodName.toLowerCase().includes(filter) ||
+      task.className.toLowerCase().includes(filter) ||
+      task.scheduleExpr.toLowerCase().includes(filter);
+    const matchType = !typeFilter || task.scheduleType === typeFilter;
+    const visible = matchFilter && matchType;
+    if (visible) count++;
+
+    const icon = task.scheduleType === 'cron' ? '⏰' : task.scheduleType === 'fixedRate' ? '🔄' : '📋';
+    const delay = task.initialDelay ? ` + ${formatInterval(task.initialDelay)}` : '';
+    const expr = task.scheduleType === 'fixedRate'
+      ? `${formatInterval(task.scheduleExpr)}${delay}`
+      : task.scheduleExpr;
+
+    const detectorBadge = task.detector && task.detector !== 'Spring @Scheduled'
+      ? `<span style="font-size:10px;color:var(--text2);background:var(--surface2);padding:1px 6px;border-radius:8px">${task.detector}</span>`
+      : '';
+
+    html += `<div class="scheduled-task ${visible ? '' : 'hidden'}">
+      <div class="task-icon">${icon}</div>
+      <div class="task-info">
+        <div class="task-name">${task.methodName}() ${detectorBadge}</div>
+        <div class="task-class">${task.className}</div>
+      </div>
+      <span class="scheduled-type-badge badge-${task.scheduleType === 'fixedDelay' ? 'fixedRate' : task.scheduleType}">${task.scheduleType}</span>
+      <span class="scheduled-expr" title="${task.scheduleExpr}">${expr}</span>
+    </div>`;
+  });
+
+  $('#scheduled-count').textContent = `${count}/${data.length} tasks`;
+  el.innerHTML = html || '<p class="loading">No tasks</p>';
+}
+
+$('#scheduled-filter')?.addEventListener('input', () => { renderScheduled(scheduledData); });
+$('#scheduled-type-filter')?.addEventListener('change', () => { renderScheduled(scheduledData); });
+
+// ── Project Structure Tree ──
+let treeData = [];
+
+async function loadTree() {
+  const el = $('#tree-list');
+  el.innerHTML = '<p class="loading">Loading project structure...</p>';
+  const data = await api('/api/tree');
+  if (!data) return;
+  treeData = data;
+  renderTree(data);
+}
+
+function renderTree(data) {
+  const el = $('#tree-list');
+  const filter = ($('#tree-filter')?.value || '').toLowerCase();
+
+  function fileIcon(name) {
+    if (!name) return '📄';
+    if (name.endsWith('.java')) return '☕';
+    if (name.endsWith('.xml')) return '⚙️';
+    if (name.endsWith('.yml') || name.endsWith('.yaml')) return '📋';
+    if (name.endsWith('.properties')) return '🔧';
+    return '📄';
+  }
+
+  function renderNode(node, isRoot = false) {
+    const match = !filter || node.name.toLowerCase().includes(filter);
+    const childMatch = node.children?.some(c => renderNode(c, false).match);
+    const visible = !filter || match || childMatch;
+
+    let icon = node.type === 'folder' ? '📁' : fileIcon(node.name);
+    let iconClass = node.type === 'folder' ? 'folder-icon' : 'file-icon';
+    let badges = '';
+
+    // Code type count badges
+    const counts = node.code_type_counts || {};
+    if (counts.class || counts.interface) {
+      const parts = [];
+      if (counts.class) parts.push(`${counts.class} class`);
+      if (counts.interface) parts.push(`${counts.interface} interface`);
+      badges = `<span class="badge">${parts.join(' · ')}</span>`;
+    }
+
+    const childrenHtml = node.children?.length
+      ? `<div class="tree-children">${node.children.map(c => renderNode(c, false).html).join('')}</div>`
+      : '';
+
+    const toggle = node.children?.length
+      ? `<span class="tree-toggle ${match || childMatch ? 'open' : ''}">&#9654;</span>`
+      : '<span style="display:inline-block;width:18px"></span>';
+
+    const html = `<div class="tree-node ${isRoot ? 'tree-node-root' : ''} ${visible ? '' : 'hidden'}">
+      ${toggle}
+      <span class="tree-label">
+        <span class="icon ${iconClass}">${icon}</span>
+        <span class="name">${node.name}</span>
+        ${badges}
+      </span>
+      ${childrenHtml}
+    </div>`;
+    return { html, match: match || childMatch };
+  }
+
+  const html = data.map(n => renderNode(n, true).html).join('');
+  el.innerHTML = html || '<p class="loading">No results</p>';
+
+  // Toggle expand/collapse
+  el.querySelectorAll('.tree-toggle').forEach(toggle => {
+    toggle.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggle.classList.toggle('open');
+      const children = toggle.parentElement.querySelector('.tree-children');
+      if (children) children.classList.toggle('open');
+    });
+  });
+}
+
+$('#tree-filter')?.addEventListener('input', () => {
+  renderTree(treeData);
+});
+
+// ── DB Field Impact ──
+let fieldImpactData = null;
+
+async function loadFieldImpactTables() {
+  const select = $('#fi-table');
+  const repo = getRepo();
+  let qs = '';
+  if (repo) qs += `repo=${encodeURIComponent(repo)}`;
+  const data = await api(`/api/db-tables?${qs}`);
+  if (!data) return;
+  const tables = data || [];
+  select.innerHTML = '<option value="">选择数据表...</option>' + tables.map(t => `<option value="${t.name}">${t.name} <span style="color:var(--text2)">(${t.source})</span></option>`).join('');
+}
+
+$('#fi-load')?.addEventListener('click', async () => {
+  const table = $('#fi-table')?.value?.trim();
+  if (!table) { alert('请选择数据表'); return; }
+  const group = $('#fi-group')?.value?.trim() || '';
+  const repo = getRepo();
+  let qs = `table=${encodeURIComponent(table)}`;
+  if (repo) qs += `&repo=${encodeURIComponent(repo)}`;
+  if (group) qs += `&group=${encodeURIComponent(group)}`;
+  const data = await api(`/api/db-field-impact?${qs}`);
+  if (!data) return;
+  fieldImpactData = data;
+  // Populate field selector
+  populateFieldSelector(data);
+  renderFieldImpact(data);
+});
+
+// When table changes, load fields and populate selector
+$('#fi-table')?.addEventListener('change', async () => {
+  const table = $('#fi-table')?.value?.trim();
+  if (!table) {
+    $('#fi-field').style.display = 'none';
+    return;
+  }
+  const group = $('#fi-group')?.value?.trim() || '';
+  const repo = getRepo();
+  let qs = `table=${encodeURIComponent(table)}`;
+  if (repo) qs += `&repo=${encodeURIComponent(repo)}`;
+  if (group) qs += `&group=${encodeURIComponent(group)}`;
+  const data = await api(`/api/db-field-impact?${qs}`);
+  if (data && !data.error) {
+    fieldImpactData = data;
+    populateFieldSelector(data);
+    renderFieldImpact(data);
+  }
+});
+
+// When field filter changes, re-render
+$('#fi-field')?.addEventListener('change', () => {
+  if (fieldImpactData) {
+    renderFieldImpact(fieldImpactData);
+  }
+});
+
+function populateFieldSelector(data) {
+  const select = $('#fi-field');
+  if (!select) return;
+  const fields = data.fields || {};
+  const allFields = data.all_fields_operations || [];
+  const fieldNames = Object.keys(fields).sort();
+  // Also add wildcard marker if there are wildcard ops
+  const hasWildcard = allFields.length > 0;
+
+  let options = '<option value="">全部字段</option>';
+  for (const fn of fieldNames) {
+    options += `<option value="${fn}">${fn}</option>`;
+  }
+  if (hasWildcard) {
+    options += `<option value="*">* (通配符：所有字段)</option>`;
+  }
+  select.innerHTML = options;
+  select.style.display = fieldNames.length > 0 ? 'block' : 'none';
+}
+
+async function loadFieldImpact() {
+  // Pre-load db-chain data for service lookup
+  if (typeof dbChainData === 'undefined' || !dbChainData) {
+    const repo = getRepo();
+    let qs = '';
+    if (repo) qs += `repo=${encodeURIComponent(repo)}`;
+    dbChainData = await api(`/api/db-chain?${qs}`);
+  }
+  await loadFieldImpactTables();
+}
+
+function renderFieldImpact(data) {
+  const el = $('#fi-content');
+  if (!data) return;
+
+  const selectedField = $('#fi-field')?.value || '';
+  const tl = data.table_level || {};
+  const apiEndpoints = tl.apiEndpoints || [];
+  const repoMethods = tl.repositoryMethods || [];
+  let fields = data.fields || {};
+  const allFields = data.all_fields_operations || [];
+  const frontendPages = tl.frontendPages || [];
+
+  // Filter by selected field
+  if (selectedField === '*') {
+    // Wildcard: show only wildcard operations, hide specific fields
+    fields = {};
+  } else if (selectedField) {
+    // Single field: filter to only this field
+    const filtered = {};
+    if (fields[selectedField]) {
+      filtered[selectedField] = fields[selectedField];
+    }
+    fields = filtered;
+  }
+
+  let html = '';
+
+  // Summary cards
+  const totalEndpoints = apiEndpoints.length;
+  const totalMethods = repoMethods.length;
+  const totalFields = Object.keys(fields).length;
+
+  // Show info about current filter
+  const filterInfo = selectedField === '*' ? ` (仅通配符操作)` :
+                     selectedField ? ` (筛选: ${selectedField})` :
+                     '';
+
+  html += `<div class="fi-summary">
+    <div class="fi-summary-card"><div class="num" style="color:var(--accent)">${totalEndpoints}</div><div class="label">API 端点${filterInfo}</div></div>
+    <div class="fi-summary-card"><div class="num" style="color:var(--orange)">${totalMethods}</div><div class="label">Mapper 方法</div></div>
+    <div class="fi-summary-card"><div class="num" style="color:var(--green)">${totalFields}</div><div class="label">匹配字段</div></div>
+    <div class="fi-summary-card"><div class="num" style="color:var(--cyan)">${frontendPages.length}</div><div class="label">前端页面</div></div>
+  </div>`;
+
+  // Group API endpoints by their called methods
+  // Build full chains: Frontend Page → API Endpoint → Controller → Service → Mapper → DB Fields
+  // First: collect all unique frontend pages
+  const pagesWithEndpoints = {};
+  for (const fp of frontendPages) {
+    const key = fp.page || `${fp.httpMethod} ${fp.httpPath}`;
+    if (!pagesWithEndpoints[key]) pagesWithEndpoints[key] = { pages: [], endpoints: [] };
+    if (fp.page) pagesWithEndpoints[key].pages.push(fp.page);
+    if (!pagesWithEndpoints[key].endpoints.some(e => e.httpPath === fp.httpPath)) {
+      pagesWithEndpoints[key].endpoints.push({ httpMethod: fp.httpMethod, httpPath: fp.httpPath });
+    }
+  }
+  // For endpoints without frontend pages, group by endpoint
+  const endpointKeys = new Set(apiEndpoints.map(e => `${e.httpMethod} ${e.httpPath}`));
+  for (const ep of apiEndpoints) {
+    const epKey = `${ep.httpMethod} ${ep.httpPath}`;
+    if (!pagesWithEndpoints[epKey]) {
+      pagesWithEndpoints[epKey] = { pages: [], endpoints: [{ httpMethod: ep.httpMethod, httpPath: ep.httpPath }] };
+    }
+  }
+
+  // For each API endpoint, find the repo methods it calls (respecting field filter)
+  const endpointRepoMethods = {};
+  for (const ep of apiEndpoints) {
+    const epKey = `${ep.httpMethod} ${ep.httpPath}`;
+    endpointRepoMethods[epKey] = [];
+    for (const rm of repoMethods) {
+      // Check if this repo method is accessed by this endpoint
+      for (const fieldInfo of Object.values(fields)) {
+        for (const acc of fieldInfo.accessed_by || []) {
+          if (acc.httpPath === ep.httpPath && acc.httpMethod === ep.httpMethod) {
+            if (!endpointRepoMethods[epKey].includes(rm)) {
+              const methodHasField = rm.fields.some(f => f.snake_field === fieldInfo.field || f.snake_field === '*');
+              if (methodHasField && !endpointRepoMethods[epKey].some(m => m.method === rm.method)) {
+                endpointRepoMethods[epKey].push(rm);
+              }
+            }
+          }
+        }
+      }
+      // Also check wildcard operations when '*' is selected
+      if (selectedField === '*') {
+        for (const acc of allFields) {
+          if (acc.httpPath === ep.httpPath && acc.httpMethod === ep.httpMethod) {
+            if (!endpointRepoMethods[epKey].some(m => m.method === rm.method)) {
+              // Check if this rm has wildcard fields
+              if (rm.fields.some(f => f.snake_field === '*')) {
+                endpointRepoMethods[epKey].push(rm);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Filter out endpoints with no matching methods
+  const activeEndpoints = apiEndpoints.filter(ep => {
+    const epKey = `${ep.httpMethod} ${ep.httpPath}`;
+    return (endpointRepoMethods[epKey] || []).length > 0;
+  });
+
+  // Render per-endpoint full chains
+  if (activeEndpoints.length > 0) {
+    html += `<div class="db-section-title">完整调用链 (${activeEndpoints.length} 个端点)</div>`;
+
+    for (const ep of activeEndpoints) {
+      const epKey = `${ep.httpMethod} ${ep.httpPath}`;
+      const calledMethods = endpointRepoMethods[epKey] || [];
+
+      // Find frontend pages for this endpoint
+      const pagesForEp = frontendPages.filter(fp => fp.httpPath === ep.httpPath && fp.httpMethod === ep.httpMethod);
+      const pageNames = pagesForEp.map(fp => fp.page).filter(Boolean);
+
+      html += `<div class="fi-chain-group">`;
+      html += `<div class="fi-chain-header" onclick="this.nextElementSibling.classList.toggle('open')">
+        <div class="fi-chain-title">
+          <span class="method-badge method-${ep.httpMethod}" style="font-size:10px;padding:2px 8px">${ep.httpMethod}</span>
+          <span class="api-info">${ep.httpPath}</span>
+          ${pageNames.length > 0 ? `<span style="font-size:11px;color:var(--cyan)">(${pageNames.join(', ')})</span>` : ''}
+        </div>
+        <span class="fi-chain-count">${calledMethods.length} 方法调用</span>
+      </div>`;
+      html += `<div class="fi-chain-body">`;
+
+      if (calledMethods.length === 0) {
+        html += `<p style="color:var(--text2);font-size:13px">未找到底层调用链路</p>`;
+      } else {
+        for (const rm of calledMethods) {
+          const specificFields = rm.fields.filter(f => f.snake_field !== '*');
+          const hasWildcard = rm.fields.some(f => f.snake_field === '*');
+
+          // Build full chain visualization
+          html += `<div class="fi-full-chain">`;
+          // Frontend (if available)
+          if (pageNames.length > 0) {
+            html += `<div class="fi-node frontend"><span class="node-label">前端</span><span class="node-name">${pageNames[0]}</span></div>`;
+            html += `<span class="fi-arrow">→</span>`;
+          }
+          // Controller
+          html += `<div class="fi-node controller"><span class="node-label">Controller</span><span class="node-name">${ep.controller}.${ep.method}()</span></div>`;
+          html += `<span class="fi-arrow">→</span>`;
+          // Service (from repo method context)
+          const svcInfo = findServiceForEndpoint(ep);
+          if (svcInfo) {
+            html += `<div class="fi-node service"><span class="node-label">Service</span><span class="node-name">${svcInfo}</span></div>`;
+            html += `<span class="fi-arrow">→</span>`;
+          }
+          // Mapper/Repository
+          html += `<div class="fi-node mapper"><span class="node-label">Mapper</span><span class="node-name">${rm.repository}.${rm.method}()</span></div>`;
+          html += `<span class="fi-arrow">→</span>`;
+          // Table + Fields
+          html += `<div class="fi-node table"><span class="node-label">表</span><span class="node-name">${tl.table}</span></div>`;
+          html += `</div>`;
+
+          // Show fields accessed by this method (respecting field filter)
+          const displayFields = selectedField === '*' ? rm.fields.filter(f => f.snake_field === '*') :
+                                selectedField ? rm.fields.filter(f => f.snake_field === selectedField || f.snake_field === '*') :
+                                specificFields;
+
+          if (displayFields.length > 0) {
+            const title = selectedField === '*' ? '通配符操作' :
+                          selectedField ? `涉及字段 (${displayFields.length}) — 筛选: ${selectedField}` :
+                          `涉及字段 (${displayFields.length})`;
+            html += `<div class="fi-fields"><div class="fi-fields-title">${title}</div>`;
+            for (const fi of displayFields) {
+              const op = fi.access_type !== 'READ' ? fi.access_type : '';
+              const highlight = fi.snake_field === selectedField ? 'style="border-color:var(--accent);box-shadow:0 0 6px rgba(124,106,255,0.4)"' : '';
+              html += `<span class="fi-field" ${highlight}>${fi.snake_field}<span class="fi-field-op">${op}</span></span>`;
+            }
+            html += `</div>`;
+          } else if (hasWildcard) {
+            html += `<div class="fi-wildcard-note">⚠️ 该方法涉及 <b>所有字段</b>（${rm.operation} 操作）</div>`;
+          }
+        }
+      }
+
+      html += `</div></div>`;
+    }
+  }
+
+  el.innerHTML = html || '<p class="loading">暂无数据</p>';
+}
+
+async function findServiceForEndpoint(ep) {
+  if (dbChainData?.chains) {
+    for (const c of dbChainData.chains) {
+      if (c.controller === ep.controller && c.controllerMethod === ep.method) {
+        return c.service.split('.').pop();
+      }
+    }
+  }
+  return null;
+}
+
+// ── API Explorer ──
+let explorerData = [];
+
+async function loadExplorer() {
+  const el = $('#explorer-list');
+  el.innerHTML = '<p class="loading">Loading API endpoints...</p>';
+  const data = await api('/api/explorer');
+  if (!data) return;
+  explorerData = data;
+  renderExplorer(data);
+}
+
+function renderExplorer(data) {
+  const el = $('#explorer-list');
+  const filter = ($('#explorer-filter')?.value || '').toLowerCase();
+
+  let totalEps = 0;
+  let visibleCtrlCount = 0;
+
+  let html = '';
+  data.forEach(ctrl => {
+    const ctrlMatch = !filter || ctrl.name.toLowerCase().includes(filter) || ctrl.basePath.toLowerCase().includes(filter);
+    const visibleEps = ctrl.endpoints.filter(ep =>
+      !filter || ep.method.toLowerCase().includes(filter) || ep.path.toLowerCase().includes(filter) || ep.methodName.toLowerCase().includes(filter)
+    );
+
+    if (!ctrlMatch && visibleEps.length === 0) return;
+
+    visibleCtrlCount++;
+    totalEps += visibleEps.length;
+
+    const isOpen = ctrlMatch;
+    html += `<div class="explorer-controller ${(!ctrlMatch && visibleEps.length === 0) ? 'hidden' : ''}">
+      <div class="explorer-ctrl-header ${isOpen ? 'open' : ''}" data-ctrl="${ctrl.fullName}">
+        <div>
+          <div class="ctrl-name">${ctrl.name}</div>
+          <div class="ctrl-path">${ctrl.basePath || '/'}</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="ctrl-badge">${ctrl.endpoints.length} endpoints</span>
+          <span class="toggle-icon">&#9654;</span>
+        </div>
+      </div>
+      <div class="explorer-endpoints ${isOpen ? 'open' : ''}">`;
+
+    ctrl.endpoints.forEach(ep => {
+      const epMatch = !filter || ep.method.toLowerCase().includes(filter) || ep.path.toLowerCase().includes(filter) || ep.methodName.toLowerCase().includes(filter);
+      html += `<div class="explorer-ep ${(!epMatch) ? 'hidden' : ''}">
+        <span class="method-badge method-${ep.method}">${ep.method}</span>
+        <span class="ep-path">${ep.path || '/'}</span>
+        <span class="ep-method-name">${ep.methodName}()</span>
+      </div>`;
+    });
+
+    html += '</div></div>';
+  });
+
+  $('#explorer-stats').textContent = `${data.length} controllers, ${data.reduce((s, c) => s + c.endpoints.length, 0)} endpoints`;
+  el.innerHTML = html || '<p class="loading">No results</p>';
+
+  // Toggle controller expand/collapse
+  document.querySelectorAll('.explorer-ctrl-header').forEach(header => {
+    header.addEventListener('click', () => {
+      header.classList.toggle('open');
+      header.nextElementSibling.classList.toggle('open');
+    });
+  });
+}
+
+$('#explorer-filter')?.addEventListener('input', () => {
+  renderExplorer(explorerData);
+});
+
+// ── Init ──
+loadRepos();
+loadOverview();
+</script>
+</body>
+</html>

@@ -4,12 +4,24 @@ from __future__ import annotations
 
 import csv
 import os
+import re
 import tempfile
 from pathlib import Path
 
 import kuzu
 
 from . import schema
+
+
+def _infer_table_from_mapper(mapper_class: str, method_name: str) -> str | None:
+    """Infer table name from Mapper class name."""
+    entity = mapper_class.replace("Mapper", "").replace("DAO", "").replace("Repository", "")
+    prefixes = ["tb_", "t_", "newbee_mall_"]
+    for p in prefixes:
+        if p in entity.lower():
+            return f"{p}{entity.lower().replace(p, '')}"
+    snake = re.sub(r'([A-Z])', r'_\1', entity).lower().lstrip("_")
+    return f"tb_{snake}" if snake else None
 
 # String values that need quoting in Cypher
 _STRING_TYPES = {"STRING"}
@@ -284,7 +296,7 @@ class GraphStore:
         return self.query(cypher, {"name": name})
 
     def symbol_context(self, name: str) -> dict:
-        """Get full context for a symbol: callers, callees, relations."""
+        """Get full context for a symbol: callers, callees, imports, accesses."""
         callers = self.query(
             "MATCH (caller)-[r:CodeRelation {type: 'CALLS'}]->(target) "
             "WHERE target.name = $name "
@@ -292,6 +304,85 @@ class GraphStore:
             "r.confidence as confidence",
             {"name": name},
         )
+
+        # Also include frontend pages that USES_ENDPOINT to this backend method
+        frontend_callers = self.query(
+            "MATCH (caller)-[r:CodeRelation {type: 'USES_ENDPOINT'}]->(target) "
+            "WHERE target.name = $name "
+            "RETURN caller.name as caller, caller.className as callerClass, "
+            "r.confidence as confidence",
+            {"name": name},
+        )
+
+        # Also try two-hop: HTML pages USES_ENDPOINT → Controller → CALLS → Interface
+        # This finds HTML pages that reach the target via Controller + Interface
+        ep_two_hop = self.query(
+            "MATCH (page:Method)-[r1:CodeRelation {type: 'USES_ENDPOINT'}]->(ctrl:Method)-[r2:CodeRelation {type: 'CALLS'}]->(iface:Method) "
+            "WHERE iface.name = $name "
+            "RETURN page.name as caller, page.className as callerClass, "
+            "       ctrl.name as ctrlName, ctrl.className as ctrlClass, "
+            "       r1.confidence as confidence",
+            {"name": name},
+        )
+
+        # Build hierarchical callers: USES_ENDPOINT pages as parents, CALLS callers as children
+        # Actual flow: HTML page → USES_ENDPOINT → Controller → CALLS → Impl (target)
+        page_map: dict[str, dict] = {}
+
+        # Attach two-hop USES_ENDPOINT pages as top-level, with Controller as child
+        for fc in ep_two_hop:
+            page_key = fc["caller"]  # HTML page name
+            ctrl_key = f"{fc['ctrlClass']}.{fc['ctrlName']}"
+            if page_key not in page_map:
+                page_map[page_key] = {
+                    "caller": fc["caller"],
+                    "callerClass": fc.get("callerClass", ""),
+                    "confidence": fc.get("confidence"),
+                    "relType": "USES_ENDPOINT",
+                    "children": [],
+                }
+            # Add Controller as child if not already present
+            if not any(ch.get("callerClass") == fc["ctrlClass"] and ch.get("caller") == fc["ctrlName"] for ch in page_map[page_key]["children"]):
+                page_map[page_key]["children"].append({
+                    "caller": fc["ctrlName"],
+                    "callerClass": fc["ctrlClass"],
+                    "confidence": None,
+                    "relType": "CALLS (via Interface)",
+                    "children": [],
+                })
+
+        # Attach direct USES_ENDPOINT callers (HTML → Controller target)
+        if frontend_callers:
+            for fc in frontend_callers:
+                page_key = fc["caller"]
+                if page_key not in page_map:
+                    page_map[page_key] = {
+                        "caller": fc["caller"],
+                        "callerClass": fc.get("callerClass", ""),
+                        "confidence": fc.get("confidence"),
+                        "relType": "USES_ENDPOINT",
+                        "children": [],
+                    }
+
+        # Add pure Java CALLS callers that don't have USES_ENDPOINT pages
+        for c in callers:
+            key = f"{c['callerClass']}.{c['caller']}" if c.get('callerClass') else c['caller']
+            # Only add if this caller isn't already a child of a USES_ENDPOINT page
+            already_in_page = any(
+                any(ch.get("callerClass") == c.get("callerClass") and ch.get("caller") == c["caller"]
+                    for ch in pm.get("children", []))
+                for pm in page_map.values()
+            )
+            if not already_in_page and key not in page_map:
+                page_map[key] = {
+                    "caller": c["caller"],
+                    "callerClass": c.get("callerClass", ""),
+                    "confidence": c.get("confidence"),
+                    "children": [],
+                }
+
+        callers_flat = list(page_map.values())
+
         callees = self.query(
             "MATCH (source)-[r:CodeRelation {type: 'CALLS'}]->(callee) "
             "WHERE source.name = $name "
@@ -299,6 +390,34 @@ class GraphStore:
             "r.confidence as confidence",
             {"name": name},
         )
+        # Build hierarchical callees with Table children under Mappers
+        callee_map: dict[str, dict] = {}
+        for c in callees:
+            key = f"{c['calleeClass']}.{c['callee']}" if c.get('calleeClass') else c['callee']
+            node = {
+                "callee": c["callee"],
+                "calleeClass": c.get("calleeClass", ""),
+                "confidence": c.get("confidence"),
+                "children": [],
+            }
+            callee_map[key] = node
+        # Infer tables for Mapper callees
+        for key, node in callee_map.items():
+            if "Mapper" in key or "DAO" in key:
+                parts = key.rsplit(".", 1)
+                if len(parts) == 2:
+                    table_name = _infer_table_from_mapper(parts[0], parts[1])
+                    if table_name:
+                        node["children"].append({
+                            "callee": table_name,
+                            "calleeClass": "",
+                            "confidence": None,
+                            "relType": "SQL (MyBatis)",
+                            "children": [],
+                        })
+
+        callees_flat = list(callee_map.values())
+
         file_paths = self.query(
             "MATCH (n) WHERE n.name = $name RETURN n.filePath as filePath",
             {"name": name},
@@ -313,10 +432,22 @@ class GraphStore:
                     "RETURN target.name as target, r.reason as reason",
                     {"fps": fps},
                 )
+        # Check if this is a Field and get ACCESSES
+        field_check = self.query("MATCH (n:Field) WHERE n.name = $name RETURN n.id as id", {"name": name})
+        accesses = []
+        if field_check:
+            accesses = self.query(
+                "MATCH (source)-[r:CodeRelation {type: 'ACCESSES'}]->(target:Field) "
+                "WHERE target.name = $name "
+                "RETURN source.name as accessor, source.className as accessorClass, "
+                "r.confidence as confidence",
+                {"name": name},
+            )
         return {
-            "callers": callers,
-            "callees": callees,
+            "callers": callers_flat,
+            "callees": callees_flat,
             "imports": imports,
+            "accesses": accesses,
         }
 
     # ------------------------------------------------------------------
