@@ -21,6 +21,7 @@ LANG_EXTENSIONS = {
     ".js": "js", ".jsx": "js",
     ".ts": "ts", ".tsx": "ts",
     ".vue": "vue",
+    ".html": "html",
 }
 
 SUPPORTED_EXTENSIONS = set(LANG_EXTENSIONS.keys())

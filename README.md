@@ -4,6 +4,8 @@
 
 通过静态分析源码，将项目结构、类、接口、方法、字段、调用关系等构建为 KuzuDB 知识图谱，为 AI Agent 提供深度代码感知能力。
 
+内置 **TestNexus** 模块：支持前端（Vue/React）测试知识图谱构建、LLM 业务模块推断、用户旅程自动生成、HTML 报告生成。
+
 **支持语言**: Java、JavaScript、TypeScript、Vue SFC
 
 ## 为什么是 PyGitNexus
@@ -72,17 +74,34 @@ uv sync
 
 ### 依赖
 
+#### PyGitNexus（核心）
+
 | 包 | 版本 | 用途 |
 |---|------|------|
 | tree-sitter | 0.23+ | AST 解析引擎 |
 | tree-sitter-java | 0.23+ | Java 语法文件 |
-| tree-sitter-javascript | 0.23+ | JavaScript 语法文件 |
+| tree-sitter-javascript | 0.25+ | JavaScript 语法文件 |
 | tree-sitter-typescript | 0.23+ | TypeScript/TSX 语法文件 |
 | kuzu | 0.11+ | 嵌入式图数据库 |
 | click | 8.1+ | CLI 框架 |
 | mcp | 1.26+ | Model Context Protocol SDK |
 
+#### TestNexus（前端测试，可选依赖）
+
+| 包 | 版本 | 用途 |
+|---|------|------|
+| pyyaml | 6.0+ | Vue/React 项目配置解析 |
+| httpx | 0.27+ | LLM API 调用 |
+| anthropic | 0.39+ | Anthropic SDK 模式 LLM（可选） |
+
+可选依赖安装：
+```bash
+uv sync --all-extras  # 包含 anthropic
+```
+
 ## 快速开始
+
+### PyGitNexus（后端知识图谱）
 
 ```bash
 # 索引一个项目（自动识别 Java/JS/TS/Vue）
@@ -108,6 +127,30 @@ uv run pygitnexus status
 uv run pygitnexus clean
 ```
 
+### TestNexus（前端测试知识图谱）
+
+```bash
+cd your-frontend-project
+
+# 分析前端项目（自动识别 Vue/React）
+uv run pygitnexus test analyze
+
+# 生成 HTML 测试报告
+uv run pygitnexus test report --output report.html
+
+# 查看已分析项目
+uv run pygitnexus test list
+
+# 查看分析状态
+uv run pygitnexus test status
+
+# LLM 智能分析（自动识别 Anthropic/OpenAI）
+uv run pygitnexus test llm-analyze
+
+# 影响分析
+uv run pygitnexus test impact
+```
+
 ## CLI 命令参考
 
 | 命令 | 说明 | 示例 |
@@ -123,6 +166,20 @@ uv run pygitnexus clean
 | `clean` | 删除当前目录索引 | `clean --all --force` 删除所有 |
 | `mcp` | 启动 MCP Server (stdio) | 供 AI 编辑器调用 |
 | `setup` | 一键配置 AI 编辑器的 MCP | 自动检测 Cursor/Claude Code/OpenCode/Codex |
+| `test` | TestNexus 前端测试子命令组 | 见下方 TestNexus 命令 |
+
+### TestNexus 子命令
+
+| 命令 | 说明 | 示例 |
+|------|------|------|
+| `test analyze` | 分析前端项目，构建测试知识图谱 | `test analyze /path/to/vue-project` |
+| `test report` | 生成 HTML 测试报告 | `test report --output report.html` |
+| `test list` | 列出已分析的前端项目 | |
+| `test status` | 当前目录分析状态 | |
+| `test clean` | 删除分析索引 | `test clean --all --force` |
+| `test llm-analyze` | LLM 智能分析（模块推断、用户旅程） | 自动识别 Anthropic/OpenAI provider |
+| `test impact` | 前端变更影响分析 | |
+| `test modules` | 查看业务模块推断结果 | |
 
 ## 输出示例
 
@@ -237,6 +294,103 @@ detect_changes(scope="compare", base_ref="main")  # 与指定分支对比
 | Claude Code | `~/.claude.json` | `~/.claude/` 目录存在 |
 | OpenCode | `~/.config/opencode/opencode.json` | `~/.config/opencode/` 目录存在 |
 | Codex | `~/.codex/config.toml` | `~/.codex/` 目录存在 |
+
+## TestNexus 前端测试
+
+TestNexus 是 PyGitNexus 内置的前端测试知识图谱构建模块，支持 Vue 和 React 项目的静态分析，自动提取页面、API 操作、组件交互关系，并生成穷举测试用例。
+
+### 核心能力
+
+| 能力 | 说明 |
+|------|------|
+| Vue SFC 扫描 | 解析 `<script>` 块、路由定义、Pinia store、API 调用 |
+| React 扫描 | 解析路由配置、Redux store、API 调用、组件引用 |
+| 操作集提取 | 自动识别 HTTP 请求、组件交互、事件处理器 |
+| LLM 模块推断 | 调用 LLM 智能识别业务模块和用户旅程 |
+| 穷举测试生成 | 单页 CRUD → 流程内串联 → 跨流程组合，三级递进 |
+| HTML 报告 | 含页面操作集、测试用例、覆盖率统计 |
+| 浏览器录制 | Playwright 录制 + 重放真实用户操作 |
+
+### 知识图谱 Schema（TestNexus）
+
+#### 节点表
+
+| 表名 | 字段 | 说明 |
+|------|------|------|
+| `Page` | id, name, path, filePath, componentName, framework | Vue/React 页面组件 |
+| `APIOperation` | id, httpMethod, apiPath, componentName, functionName | HTTP API 调用 |
+| `Component` | id, name, filePath, framework, kind | 组件定义 |
+| `Action` | id, name, componentName, type | 用户交互操作（click, input 等） |
+| `Store` | id, name, filePath, framework | 状态管理（Pinia/Redux） |
+| `Route` | id, path, name, componentPath | 路由定义 |
+| `Module` | id, name, description | LLM 推断的业务模块 |
+| `Workflow` | id, name, description, steps | LLM 推断的用户旅程 |
+
+#### 关系表
+
+| 关系 | 来源 → 目标 | 说明 |
+|------|------------|------|
+| `CONTAINS_API` | Page → APIOperation | 页面包含的 API 调用 |
+| `CONTAINS_ACTION` | Page → Action | 页面包含的交互操作 |
+| `USES_STORE` | Page → Store | 页面使用的状态管理 |
+| `HAS_ROUTE` | Page → Route | 页面对应的路由 |
+| `INFERS_MODULE` | Page → Module | LLM 推断页面所属模块 |
+| `BELONGS_FLOW` | Module → Workflow | 模块所属用户旅程 |
+
+### 测试用例生成策略
+
+TestNexus 使用三级穷举策略生成测试用例：
+
+| 级别 | 策略 | 生成数量示例 |
+|------|------|-------------|
+| Level 1 | 单页 CRUD：每个页面的操作集穷举 | ~4 个（每个页面 ≥2 个 fetch 操作） |
+| Level 2 | 流程内串联：同一业务流内的页面链 | ~3 个（如 cart→order→pay） |
+| Level 3 | 跨流程组合：多个业务流的组合 | ~4 个（如 auth+cart+order） |
+
+### LLM 智能分析
+
+```bash
+# 自动检测 provider（Anthropic SDK / OpenAI 兼容 HTTP）
+uv run pygitnexus test llm-analyze
+
+# 支持的环境变量
+ANTHROPIC_BASE_URL=<url>   # Anthropic SDK 模式
+OPENAI_API_KEY=<key>       # OpenAI 兼容模式
+```
+
+Provider 自动检测逻辑：
+1. 检查 URL hostname：`api.anthropic.com` → Anthropic SDK
+2. 检查 URL 路径：包含 `/anthropic` → Anthropic SDK
+3. 其他情况 → OpenAI 兼容 HTTP
+
+### 输出示例
+
+```
+$ pygitnexus test analyze my-vue-app
+Analyzing my-vue-app (Vue project)...
+  [ 10%] Scanning for Vue/TS/JS files...
+  [ 30%] Found 56 files (42 Vue, 10 TS, 4 JS)
+  [ 60%] Extracting pages, routes, stores...
+  [ 80%] Building test knowledge graph...
+  [100%] Analysis complete
+
+Analysis complete!
+  Pages:         14
+  API Operations: 48
+  Actions:       23
+  Components:    56
+  Stores:        4
+  Routes:        12
+```
+
+```
+$ pygitnexus test generate
+Generating test cases...
+  Level 1: Single-page CRUD — 4 journeys
+  Level 2: Intra-flow chains — 3 journeys
+  Level 3: Cross-flow combos — 4 journeys
+  Total: 11 user journeys written to graph
+```
 
 ## 调用解析策略
 
@@ -403,8 +557,8 @@ analyze(repo_path)
 
 ```
 src/pygitnexus/
-├── cli/                    # CLI 命令入口
-│   ├── main.py             # 主命令组 (click group)
+├── cli/                    # CLI 命令入口（PyGitNexus）
+│   ├── main.py             # 主命令组 (click group) + TestNexus 子命令组
 │   ├── analyze.py          # 索引命令
 │   ├── query.py            # 符号搜索
 │   ├── context.py          # 符号上下文
@@ -413,8 +567,9 @@ src/pygitnexus/
 │   ├── status.py           # 仓库状态
 │   ├── clean.py            # 删除索引
 │   ├── mcp.py              # MCP Server 启动命令
-│   └── setup.py            # 编辑器 MCP 配置
-├── core/                   # 核心分析引擎
+│   ├── setup.py            # 编辑器 MCP 配置
+│   └── group.py            # 项目分组命令
+├── core/                   # 核心分析引擎（PyGitNexus）
 │   ├── scanner.py          # 文件扫描（支持 .gitignore）
 │   ├── extractor.py        # Java tree-sitter AST 解析
 │   ├── extractor_js.py     # JavaScript AST 解析
@@ -424,15 +579,55 @@ src/pygitnexus/
 │   ├── resolver_js.py      # JS/TS/Vue 调用解析（6 Case 策略）
 │   ├── pipeline.py         # 多语言管线编排 + 并行调度
 │   └── models.py           # 数据模型（SourceFile, ParsedFile, etc.）
-├── graph/                  # 图数据库层
+├── graph/                  # 图数据库层（PyGitNexus）
 │   ├── schema.py           # KuzuDB schema 定义
 │   └── store.py            # KuzuDB 操作封装 (UNWIND/COPY FROM)
-├── mcp/                    # MCP Server
+├── mcp/                    # MCP Server（PyGitNexus）
 │   └── server.py           # MCP 工具定义（6 个 tools）
-├── search/                 # 查询接口
+├── search/                 # 查询接口（PyGitNexus）
 │   └── query.py            # 符号搜索、上下文、Cypher
-└── storage/                # 存储管理
-    └── repo_manager.py     # 仓库注册表
+├── storage/                # 存储管理（PyGitNexus）
+│   └── repo_manager.py     # 仓库注册表
+└── testnexus/              # TestNexus 前端测试模块
+    ├── cli/                # TestNexus CLI 命令
+    │   ├── main.py         # test 命令入口
+    │   ├── analyze.py      # test analyze
+    │   ├── generate.py     # test generate（穷举测试用例）
+    │   ├── report.py       # test report（HTML 报告）
+    │   ├── llm_analyze.py  # test llm-analyze
+    │   ├── record.py       # test record（浏览器录制）
+    │   ├── replay_cmd.py   # test replay（操作重放）
+    │   ├── impact.py       # test impact（影响分析）
+    │   ├── modules_cmd.py  # test modules（模块查看）
+    │   ├── status.py       # test status
+    │   ├── list.py         # test list
+    │   ├── clean.py        # test clean
+    │   └── _common.py      # 公共参数
+    ├── core/               # 核心引擎
+    │   ├── pipeline.py     # 分析管线编排
+    │   ├── metadata_extractor.py # 前端项目元数据提取
+    │   ├── module_infer.py # LLM 模块推断
+    │   ├── llm_analyzer.py # LLM 分析编排
+    │   ├── llm_provider.py # LLM provider 自动检测
+    │   ├── mapper.py       # 数据映射
+    │   └── models.py       # TestNexus 数据模型
+    ├── scanners/           # 前端扫描器
+    │   ├── base.py         # 扫描器基类
+    │   ├── vue_scanner.py  # Vue 项目扫描器
+    │   └── react_scanner.py # React 项目扫描器
+    ├── generators/         # 测试用例生成
+    │   ├── api_test.py     # API 测试用例生成（三级穷举）
+    │   └── e2e_test.py     # E2E 测试用例生成
+    ├── graph/              # TestNexus 图数据库层
+    │   ├── schema.py       # TestNexus KuzuDB schema
+    │   └── store.py        # TestNexus 图操作
+    ├── report/             # 报告生成
+    │   └── html_report.py  # HTML 报告生成（含页面操作集）
+    ├── recorder/           # 浏览器录制
+    │   ├── capture.py      # 操作捕获
+    │   └── replay.py       # 操作重放
+    └── storage/            # TestNexus 存储
+        └── meta.py         # 元数据管理
 ```
 
 ## 准确率验证
@@ -484,16 +679,33 @@ GitNexus 独有调用中约 2,000+ 条为已知的 JDK/Logger 方法误匹配假
 PyGitNexus 内置回归测试脚本，确保多语言解析器互不影响：
 
 ```bash
+# 前端 Vue 回归测试（newbee-mall-vue3-app，33 文件，默认）
+uv run python tests/regression_newbee.py
+
 # Java 回归测试（shenyu 项目，3,176 文件）
 uv run python tests/regression_shenyu.py
+
+# JS/TS/Vue 自动化对比测试
+python tests/compare_calls.py /path/to/js-ts-project
 ```
 
-测试内容：
+#### newbee 回归测试内容（6 项）
+
+1. Vue 文件扫描完整性（>=20 文件）
+2. 页面提取完整性（>=10 页面，router + views 约定）
+3. 组件提取（>=15 组件）
+4. 操作 + API 调用提取（>=15 操作，>=15 API 调用）
+5. 模块推断（不崩溃验证）
+6. 完整流水线运行（fresh 分析 + 图谱验证 >50 节点）
+
+#### shenyu 回归测试内容（6 项）
+
 1. Java 文件扫描完整性（>3000 文件）
 2. Java 文件解析完整性（Class/Method/Call 数量验证）
 3. Java 调用解析完整性
-4. JS/TS 解析器 import 隔离（无交叉导入）
-5. 完整流水线运行（全量 Java 解析 + 调用解析）
+4. 与 GitNexus Java 调用链对比
+5. JS/TS 解析器 import 隔离（无交叉导入）
+6. 完整流水线运行（全量 Java 解析 + 调用解析）
 
 ### 对比测试
 

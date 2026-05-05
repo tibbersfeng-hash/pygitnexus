@@ -13,10 +13,41 @@ from ..core.extractor import parse as parse_java
 from ..core.extractor_js import parse as parse_js
 from ..core.extractor_ts import parse as parse_ts
 from ..core.extractor_vue import parse as parse_vue
+from ..core.extractor_html import parse as parse_html
 from ..core.resolver import resolve_calls, resolve_imports
 from ..core.resolver_js import resolve_js_ts_calls
 from ..graph.store import GraphStore
 from ..storage.repo_manager import register_repo, RepoInfo
+
+
+def _resolve_html_endpoint_calls(parsed_files: list) -> list[tuple]:
+    """Extract HTTP endpoint calls from HTML template files.
+
+    HTML files produce CallSite objects with http_method/http_path from
+    window.location.href, $.ajax, fetch(), and form actions. These are
+    returned as 8-tuples for direct inclusion in call_relations.
+
+    Returns:
+        List of (caller, caller_file, target, target_file, confidence,
+                 http_method, http_path, http_params) tuples.
+    """
+    results: list[tuple] = []
+    for pf in parsed_files:
+        if not pf.file_path.endswith(".html"):
+            continue
+        for call in pf.calls:
+            if call.http_method and call.http_path:
+                results.append((
+                    call.caller_method or pf.file_path,
+                    pf.file_path,
+                    call.target_name,
+                    "",  # No specific target file — matched via USES_ENDPOINT
+                    0.7,
+                    call.http_method,
+                    call.http_path,
+                    call.http_params,
+                ))
+    return results
 
 
 def run_analysis(
@@ -71,7 +102,11 @@ def run_analysis(
     js_ts_relations = resolve_js_ts_calls(parsed_files, project_root=str(repo_path))
     call_relations.extend(js_ts_relations)
 
-    # Step 3c: Enrich Java CALLS relations with Spring endpoint info
+    # Step 3c: Extract HTML template HTTP endpoint references
+    html_relations = _resolve_html_endpoint_calls(parsed_files)
+    call_relations.extend(html_relations)
+
+    # Step 3d: Enrich Java CALLS relations with Spring endpoint info
     # Build (method_name, file_path) → (http_method, http_path) from controller annotations
     spring_endpoint_map = _build_spring_endpoint_map(parsed_files)
     call_relations = _enrich_java_calls(call_relations, spring_endpoint_map)
@@ -113,6 +148,8 @@ def _parse_file(sf) -> ParsedFile:
         return parse_ts(sf.relative, sf.content)
     elif sf.lang == "vue":
         return parse_vue(sf.relative, sf.content)
+    elif sf.lang == "html":
+        return parse_html(sf.relative, sf.content)
     else:
         raise ValueError(f"Unknown language: {sf.lang}")
 
@@ -765,18 +802,21 @@ def _write_to_graph_batched(
                     "from_id": caller_id,
                     "to_id": backend_id,
                     "confidence": 0.85,
+                    "httpMethod": http_method or "",
+                    "httpPath": http_path or "",
                 }
                 if http_params:
                     rel_data["httpParams"] = http_params
+                else:
+                    rel_data["httpParams"] = ""
                 uses_endpoint_rels.append(rel_data)
 
         if uses_endpoint_rels:
-            has_params = any("httpParams" in r for r in uses_endpoint_rels)
-            extra = ["httpMethod", "httpPath"] + (["httpParams"] if has_params else [])
+            # Always include all HTTP columns to match the fixed CodeRelation schema
             store.bulk_copy_relations(
                 "Method", "Method", uses_endpoint_rels, "USES_ENDPOINT",
                 "frontend → backend endpoint match",
-                extra_columns=extra,
+                extra_columns=["httpMethod", "httpPath", "httpParams"],
             )
         _step(f"USES_ENDPOINT done ({len(uses_endpoint_rels)} relations)")
 
@@ -976,8 +1016,8 @@ def _chunked(lst: list, size: int) -> list:
 
 
 def _is_js_ts_file(file_path: str) -> bool:
-    """Check if a file path is JS/TS/Vue based on extension."""
-    return file_path.endswith((".js", ".jsx", ".ts", ".tsx", ".vue"))
+    """Check if a file path is JS/TS/Vue/HTML based on extension."""
+    return file_path.endswith((".js", ".jsx", ".ts", ".tsx", ".vue", ".html"))
 
 
 def _compute_stats(parsed_files: list[ParsedFile]) -> dict:

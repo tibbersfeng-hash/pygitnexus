@@ -12,7 +12,7 @@ from mcp.server.fastmcp import FastMCP
 
 from ..graph.store import GraphStore
 from ..search.query import query as graph_query, symbol_context, run_cypher
-from ..storage.repo_manager import list_repos
+from ..storage.repo_manager import list_repos as _list_repos
 
 
 def _resolve_db_path(repo: str | None) -> tuple[Path | None, Path | None]:
@@ -26,7 +26,7 @@ def _resolve_db_path(repo: str | None) -> tuple[Path | None, Path | None]:
         if p.exists():
             return p, Path(repo).resolve()
         # Try as repo name from registry
-        for r in list_repos():
+        for r in _list_repos():
             if r.name == repo:
                 root = Path(r.path).resolve()
                 p = root / ".pygitnexus" / "kuzu"
@@ -39,12 +39,18 @@ def _resolve_db_path(repo: str | None) -> tuple[Path | None, Path | None]:
     if p.exists():
         return p, cwd
     # Fallback: check registry for cwd
-    for r in list_repos():
+    for r in _list_repos():
         if Path(r.path).resolve() == cwd:
             root = Path(r.path).resolve()
             p = root / ".pygitnexus" / "kuzu"
             if p.exists():
                 return p, root
+    # Final fallback: return the first indexed repo
+    for r in _list_repos():
+        root = Path(r.path).resolve()
+        p = root / ".pygitnexus" / "kuzu"
+        if p.exists():
+            return p, root
     return None, None
 
 
@@ -266,13 +272,13 @@ def create_server() -> FastMCP:
     )
 
     @mcp.tool()
-    def list_repos() -> str:
+    def _list_repos() -> str:
         """List all indexed repositories available to PyGitNexus.
 
         WHEN TO USE: First step when multiple repos are indexed, or to discover available repos.
         AFTER THIS: Use query(), context(), or cypher() with the repo parameter.
         """
-        repos = list_repos()
+        repos = __list_repos()
         if not repos:
             return "No indexed repositories found. Run 'pygitnexus analyze' in a Java project."
         lines = []
@@ -695,6 +701,315 @@ def create_server() -> FastMCP:
                 if len(steps) > 5:
                     lines.append(f"    ... and {len(steps) - 5} more")
             lines.append("")
+
+        return "\n".join(lines)
+
+    # ─── db_chain ────────────────────────────────────────────────────
+
+    @mcp.tool()
+    def db_chain(repo: str | None = None) -> str:
+        """Show database operation chains: Controller → Service → Repository → Table.
+
+        WHEN TO USE: Understanding how frontend pages trigger backend database operations.
+        Shows ORM-detected tables, service→repository call chains, and JdbcTemplate usage.
+        AFTER THIS: Use frontend_pages() to see which frontend pages call these APIs.
+
+        Args:
+            repo: Repository name or path. Omit if only one repo is indexed.
+        """
+        store, repo_root = _load_store(repo)
+        if store is None:
+            return f"Error: No indexed repository found{' for ' + repo if repo else ''}."
+        try:
+            from ..web.frontend_mapper import query_db_chain
+            result = query_db_chain(str(repo_root), store)
+        finally:
+            store.close()
+
+        lines = [f"Database Chains for {repo or 'current repo'}:\n"]
+
+        tables = result.get("tables", [])
+        chains = result.get("chains", [])
+        repo_methods = result.get("repository_methods", [])
+        jt_services = result.get("jdbcTemplate_services", [])
+
+        lines.append(f"Tables ({len(tables)}):")
+        for t in tables:
+            lines.append(f"  - {t.get('name', '?')} (entity: {t.get('className', '?')})")
+        if not tables:
+            lines.append("  (none detected — may use MyBatis XML or dynamic SQL)")
+
+        lines.append(f"\nFull Chains ({len(chains)}):")
+        for c in chains:
+            lines.append(
+                f"  {c['controller']}.{c.get('controllerMethod', '')} → "
+                f"{c['service']}.{c.get('serviceMethod', '')} → "
+                f"{c['repository']}.{c.get('repoMethod', '')} → "
+                f"{c.get('table', '?') or '(unknown table)'}"
+            )
+        if not chains:
+            lines.append("  (no Controller→Service→Repository chains found)")
+
+        if repo_methods:
+            lines.append(f"\nRepository Methods ({len(repo_methods)}):")
+            for rm in repo_methods[:20]:
+                lines.append(
+                    f"  {rm['repository']}.{rm['method']} → "
+                    f"[{rm['operation']}] table={rm.get('table', '?')}"
+                )
+            if len(repo_methods) > 20:
+                lines.append(f"  ... and {len(repo_methods) - 20} more")
+
+        if jt_services:
+            lines.append(f"\nJdbcTemplate Services ({len(jt_services)}):")
+            for svc in jt_services[:10]:
+                lines.append(f"  - {svc}")
+            if len(jt_services) > 10:
+                lines.append(f"  ... and {len(jt_services) - 10} more")
+
+        return "\n".join(lines)
+
+    # ─── frontend_pages ──────────────────────────────────────────────
+
+    @mcp.tool()
+    def frontend_pages(repo: str | None = None, group: str | None = None) -> str:
+        """Map frontend pages to backend API endpoints and database tables.
+
+        Supports two modes:
+        - **Single-repo**: repo has both frontend and backend code
+        - **Cross-repo (group)**: frontend and backend are in separate repos linked by a group
+
+        WHEN TO USE: Understanding which frontend pages call which backend APIs.
+        AFTER THIS: Use db_chain() for database details, context() for symbol details.
+
+        Args:
+            repo: Repository name or path for single-repo mode.
+            group: Group name for cross-repo mode (mutually exclusive with repo).
+        """
+        if group:
+            from ..web.frontend_mapper import query_frontend_pages_group
+            result = query_frontend_pages_group(group)
+            if "error" in result:
+                return f"Error: {result['error']}"
+        elif repo:
+            store, repo_root = _load_store(repo)
+            if store is None:
+                return f"Error: No indexed repository found{' for ' + repo if repo else ''}."
+            try:
+                from ..web.frontend_mapper import query_frontend_pages_single_repo
+                result = query_frontend_pages_single_repo(str(repo_root), store)
+            finally:
+                store.close()
+        else:
+            return "Error: Specify 'repo' for single-repo mode or 'group' for cross-repo mode."
+
+        mode = result.get("mode", "?")
+        source = result.get("source", "?")
+        api_calls = result.get("apiCalls", [])
+        pages = result.get("frontendPages", [])
+        matched = result.get("matchedApiCalls", 0)
+        total = result.get("totalApiCalls", 0)
+
+        lines = [
+            f"Frontend Pages ({mode}, source={source}):",
+            f"  {matched}/{total} API calls matched to backend endpoints",
+            f"  {len(pages)} unique frontend pages\n",
+        ]
+
+        if pages:
+            lines.append("Pages:")
+            for p in pages:
+                lines.append(f"  - {p}")
+            lines.append("")
+
+        if api_calls:
+            lines.append("API Call Mappings:")
+            for a in api_calls[:30]:
+                table_info = ""
+                tbls = a.get("linkedTables", [])
+                if tbls:
+                    table_info = f" → tables: {', '.join(tbls)}"
+                svc = a.get("linkedService", "")
+                if svc:
+                    table_info += f" (service: {svc})"
+                lines.append(
+                    f"  {a['page']}: {a.get('httpMethod', '?')} {a.get('httpPath', '?')} "
+                    f"→ {a.get('controller', '?')}.{a.get('controllerMethod', '?')} "
+                    f"({a.get('matchType', '?')}){table_info}"
+                )
+            if len(api_calls) > 30:
+                lines.append(f"  ... and {len(api_calls) - 30} more")
+
+        unmatched = result.get("unmatchedCalls", 0)
+        if unmatched:
+            lines.append(f"\n{unmatched} unmatched API calls (no backend endpoint found)")
+
+        return "\n".join(lines)
+
+    # ─── Group management ────────────────────────────────────────────
+
+    @mcp.tool()
+    def list_groups() -> str:
+        """List all repo groups (for cross-repo frontend→backend mapping).
+
+        WHEN TO USE: See available groups before using frontend_pages(group=...).
+        Groups link separate frontend and backend repos for cross-repo queries.
+        """
+        from ..storage.repo_manager import list_groups
+
+        groups = list_groups()
+        if not groups:
+            return "No repo groups found. Create one with create_group() to link frontend and backend repos."
+
+        lines = [f"Repo groups ({len(groups)}):\n"]
+        for g in groups:
+            lines.append(f"- {g.name} ({g.label})")
+            for r in g.repos:
+                lines.append(f"    [{r.role}] {r.name} → {r.path}")
+        return "\n".join(lines)
+
+    @mcp.tool()
+    def create_group(name: str, label: str, repos: list[dict]) -> str:
+        """Create a repo group to link frontend and backend repositories.
+
+        WHEN TO USE: Frontend and backend code are in separate repos but you need
+        to trace API calls across them. Create a group, then use frontend_pages(group=...).
+
+        Args:
+            name: Unique group identifier.
+            label: Human-readable label.
+            repos: List of {name, path, role} dicts. role must be 'backend' or 'frontend'.
+
+        EXAMPLE:
+            create_group(
+                name="myapp",
+                label="MyApp Full Stack",
+                repos=[
+                    {"name": "myapp-backend", "path": "/path/to/backend", "role": "backend"},
+                    {"name": "myapp-frontend", "path": "/path/to/frontend", "role": "frontend"},
+                ]
+            )
+        """
+        from ..storage.repo_manager import create_group
+
+        for r in repos:
+            if r.get("role") not in ("backend", "frontend"):
+                return f"Error: Each repo must have role 'backend' or 'frontend'. Got: {r.get('role')}"
+
+        group = create_group(name, label, repos)
+        lines = [f"Created group '{group.name}' ({group.label}):\n"]
+        for r in group.repos:
+            lines.append(f"  [{r.role}] {r.name} → {r.path}")
+        return "\n".join(lines)
+
+    @mcp.tool()
+    def delete_group(name: str) -> str:
+        """Delete a repo group.
+
+        Args:
+            name: Group name to delete.
+        """
+        from ..storage.repo_manager import delete_group
+
+        if delete_group(name):
+            return f"Deleted group '{name}'."
+        return f"Group '{name}' not found."
+
+    # ─── db_field_impact ─────────────────────────────────────────────
+
+    @mcp.tool()
+    def db_field_impact(table: str, repo: str | None = None, group: str | None = None) -> str:
+        """Show which top-level entry points (frontend pages, scheduled tasks, API endpoints) access a given database table and its fields.
+
+        WHEN TO USE: Before modifying a DB table/schema — to understand which
+        features, pages, or cron jobs will be affected. Provides both table-level
+        and field-level impact data.
+        AFTER THIS: Use frontend_pages() or impact() on specific symbols for detail.
+
+        Args:
+            table: Database table name (e.g., "team_members").
+            repo: Repository name or path. Omit if only one repo is indexed.
+            group: Group name for cross-repo frontend page matching.
+        """
+        store, repo_root = _load_store(repo)
+        if store is None:
+            return f"Error: No indexed repository found{' for ' + repo if repo else ''}."
+        try:
+            from ..web.frontend_mapper import query_db_field_impact
+            result = query_db_field_impact(str(repo_root), store, table, group)
+        finally:
+            store.close()
+
+        if "error" in result:
+            return f"Error: {result['error']}"
+
+        lines = [
+            f"DB Field Impact for table '{table}':",
+            f"Entity: {result.get('entityClass', '?')}\n",
+        ]
+
+        # Table-level impact
+        tl = result.get("table_level", {})
+        scheduled = tl.get("scheduledTasks", [])
+        api_eps = tl.get("apiEndpoints", [])
+        repo_methods = tl.get("repositoryMethods", [])
+
+        lines.append(f"Repository Methods ({len(repo_methods)}):")
+        for rm in repo_methods:
+            fields_str = ", ".join(f["snake_field"] for f in rm.get("fields", []))
+            lines.append(f"  {rm['repository']}.{rm['method']} [{rm['operation']}] → {fields_str}")
+        lines.append("")
+
+        lines.append(f"Scheduled Tasks ({len(scheduled)}):")
+        for st in scheduled:
+            lines.append(f"  {st['class']}.{st['method']}")
+        if not scheduled:
+            lines.append("  (none)")
+        lines.append("")
+
+        lines.append(f"API Endpoints ({len(api_eps)}):")
+        for ep in api_eps[:20]:
+            lines.append(
+                f"  {ep['httpMethod']} {ep['httpPath']} → {ep['controller']}.{ep['method']}"
+            )
+        if not api_eps:
+            lines.append("  (none)")
+        elif len(api_eps) > 20:
+            lines.append(f"  ... and {len(api_eps) - 20} more")
+
+        pages = tl.get("frontendPages", [])
+        lines.append(f"\nFrontend Pages ({len(pages)}):")
+        for p in pages[:20]:
+            lines.append(f"  {p['page']}: {p['httpMethod']} {p['httpPath']} ({p.get('file', '')})")
+        if not pages:
+            lines.append("  (none — no frontend code or group specified)")
+        elif len(pages) > 20:
+            lines.append(f"  ... and {len(pages) - 20} more")
+        lines.append("")
+
+        # Field-level impact
+        fields = result.get("fields", {})
+        if fields:
+            lines.append(f"Field-level Impact ({len(fields)} fields):\n")
+            for fname, finfo in sorted(fields.items()):
+                ops = ", ".join(finfo["operations"])
+                n_access = len(finfo["accessed_by"])
+                lines.append(f"  {fname} [{ops}] — accessed by {n_access} entry point(s)")
+                for ab in finfo["accessed_by"][:5]:
+                    if ab["type"] == "scheduled_task":
+                        lines.append(f"    - [task] {ab['class']}.{ab['method']}")
+                    elif ab["type"] == "api_endpoint":
+                        pages_str = ""
+                        fps = ab.get("frontendPages", [])
+                        if fps:
+                            pages_str = f" ← pages: {', '.join(fps)}"
+                        lines.append(
+                            f"    - [api] {ab.get('httpMethod', '?')} {ab.get('httpPath', '?')} → {ab['controller']}.{ab['method']}{pages_str}"
+                        )
+                if len(finfo["accessed_by"]) > 5:
+                    lines.append(f"    ... and {len(finfo['accessed_by']) - 5} more")
+        else:
+            lines.append("No field-level impact detected (methods may not follow Spring Data naming).")
 
         return "\n".join(lines)
 

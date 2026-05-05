@@ -1,6 +1,6 @@
 # PyGitNexus
 
-Java 代码库知识图谱构建工具 —— GitNexus 的高性能 Python 实现。
+多语言代码库知识图谱构建工具 + TestNexus 前端测试知识图谱 —— GitNexus 的高性能 Python 实现。
 
 ## 项目位置
 
@@ -50,6 +50,15 @@ analyze(repo_path)
 | `src/pygitnexus/graph/store.py` | KuzuDB 操作封装 |
 | `src/pygitnexus/mcp/server.py` | MCP Server（6 个工具） |
 | `pygitnexus.spec` | PyInstaller 打包配置 |
+| `src/pygitnexus/testnexus/core/pipeline.py` | TestNexus 分析管线 |
+| `src/pygitnexus/testnexus/core/llm_provider.py` | LLM provider 自动检测 |
+| `src/pygitnexus/testnexus/generators/api_test.py` | 三级穷举测试生成 |
+| `src/pygitnexus/testnexus/report/html_report.py` | HTML 报告生成 |
+
+### TestNexus 子命令
+
+所有 TestNexus 命令通过 `pygitnexus test <subcommand>` 访问，共 12 个子命令。
+详见 README.md "TestNexus 子命令" 表。
 
 ### MCP Server 工具
 
@@ -88,7 +97,27 @@ analyze(repo_path)
 ## 测试数据
 
 - **dashboard-backend**: `/home/claude/codespace/life-death/dashboard-backend/` — 127 Java 文件
-- **shenyu**: `/home/claude/codespace/shenyu/` — 3,176 Java 文件（性能基准）
+- **shenyu**: `/home/claude/codespace/shenyu/` — 3,176 Java 文件（Java 性能基准）
+- **newbee-mall-vue3-app**: `/tmp/test-projects/newbee-mall-vue3-app/` — 33 文件，20 Vue，14 页面（默认前端回归测试）
+
+## 回归测试
+
+| 测试文件 | 用途 | 运行命令 |
+|---------|------|---------|
+| `tests/regression_newbee.py` | 前端 Vue 项目回归测试（6 项） | `uv run python tests/regression_newbee.py` |
+| `tests/regression_shenyu.py` | Java 项目回归测试（6 项） | `uv run python tests/regression_shenyu.py` |
+| `tests/compare_calls.py` | JS/TS/Vue 调用链对比 | `python tests/compare_calls.py /path/to/project` |
+
+### 回归测试指标（newbee）
+
+| 测试 | 期望值 | 实际 |
+|------|--------|------|
+| Vue 文件 | >=20 | 20 |
+| 页面 | >=10 | 14 |
+| 组件 | >=15 | 20 |
+| 操作 | >=15 | 18 |
+| API 调用 | >=15 | 26 |
+| 图谱节点 | >50 | 78 |
 
 ## README 更新规则
 
