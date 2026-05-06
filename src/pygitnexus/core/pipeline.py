@@ -120,6 +120,8 @@ def run_analysis(
     store = GraphStore(db_path)
     store.init_schema()
     _write_to_graph_batched(store, parsed_files, source_files, repo_path, call_relations, class_map, spring_endpoint_map)
+    # Step 4b: Parse MyBatis mapper XMLs and create MAPS_TO edges
+    _write_mybatis_relations(store, source_files, parsed_files)
     graph_elapsed = time.monotonic() - t1
     _progress(95, f"Graph built in {graph_elapsed:.1f}s")
 
@@ -230,7 +232,7 @@ def _write_to_graph_batched(
     repo_path: Path,
     call_relations: list[tuple],
     class_map: dict[str, str],
-    spring_endpoint_map: dict[str, dict[str, tuple[str, str]]] | None = None,
+    spring_endpoint_map: dict[str, list[tuple[str, str, str]]] | None = None,
 ) -> None:
     """Write all parsed data to the graph database using batched UNWIND."""
     _t0 = time.monotonic()
@@ -443,10 +445,16 @@ def _write_to_graph_batched(
                     "content": method.content[:5000],
                     "from_id": file_id,
                 }
-                # Add HTTP endpoint info for Spring controller methods
-                file_endpoints = spring_endpoint_map.get(pf.file_path, {}) if spring_endpoint_map else {}
-                if method.name in file_endpoints:
-                    http_method, http_path = file_endpoints[method.name]
+                # Add HTTP endpoint info for Spring controller methods (kept for backward compat)
+                file_endpoints = spring_endpoint_map.get(pf.file_path, []) if spring_endpoint_map else []
+                # Find first matching endpoint for this method (there may be multiple)
+                method_http = None
+                for mn, hm, hp in file_endpoints:
+                    if mn == method.name:
+                        method_http = (hm, hp)
+                        break
+                if method_http:
+                    http_method, http_path = method_http
                     method_data["httpMethod"] = http_method
                     method_data["httpPath"] = http_path
                 else:
@@ -548,6 +556,51 @@ def _write_to_graph_batched(
         # HAS_METHOD (requires Class/Interface AND Method to exist)
         bw.insert_typed_relations("Class", "Method", has_methods, "HAS_METHOD", 1.0, "class has method")
         bw.insert_typed_relations("Interface", "Method", has_methods, "HAS_METHOD", 1.0, "interface has method")
+
+        # HAS_SETTER / HAS_GETTER: Field → Method (by JavaBean naming convention)
+        has_setters: list[dict] = []
+        has_getters: list[dict] = []
+        for pf in parsed_files:
+            for field in pf.fields:
+                prop = field.name
+                if not prop or not field.class_name:
+                    continue
+                # Build expected setter/getter names
+                cap = prop[0].upper() + prop[1:] if len(prop) > 1 else prop.upper()
+                setter_name = f"set{cap}"
+                getter_name = f"get{cap}"
+                # Look up field ID and matching method IDs
+                fid = field_ids.get((prop, field.file_path))
+                if not fid:
+                    fid = field_ids.get((f"{field.class_name}.{prop}", field.file_path))
+                if not fid:
+                    continue
+                for method in pf.methods:
+                    if method.class_name != field.class_name or not method.class_name:
+                        continue
+                    key = (f"{method.class_name}.{method.name}", method.file_path)
+                    mid = method_ids.get(key)
+                    if not mid:
+                        continue
+                    if method.name == setter_name:
+                        has_setters.append({"from_id": fid, "to_id": mid})
+                    elif method.name == getter_name:
+                        has_getters.append({"from_id": fid, "to_id": mid})
+                    # Boolean getter: isXxx
+                    elif prop.startswith("is") and len(prop) > 2:
+                        is_getter = f"is{prop[0].upper()}{prop[1:]}" if prop[1:] != prop[1:].lower() else f"is{prop}"
+                        if method.name == is_getter or method.name == f"is{cap}":
+                            has_getters.append({"from_id": fid, "to_id": mid})
+        if has_setters:
+            bw.insert_typed_relations(
+                "Field", "Method", has_setters, "HAS_SETTER", 1.0,
+                "field has setter method",
+            )
+        if has_getters:
+            bw.insert_typed_relations(
+                "Field", "Method", has_getters, "HAS_GETTER", 1.0,
+                "field has getter method",
+            )
 
         # Insert Constructor nodes — deduplicate by ID
         _seen_ctor_ids: set[str] = set()
@@ -695,6 +748,66 @@ def _write_to_graph_batched(
         bw.insert_nodes_with_defines("Enum", enum_defines, "DEFINES")
         _step("TypeAlias and Enum done")
 
+        # 5b. Write API nodes and EXPOSES relations (Method → API)
+        # Each Spring endpoint annotation creates an API node.
+        # Multiple methods can expose the same API, but each API node is unique by (httpMethod, httpPath).
+        _step("Building API nodes...")
+        api_nodes: list[dict] = []
+        exposes_rels: list[dict] = []
+        seen_api_ids: set[str] = set()
+        # (http_method, http_path) → api_id for USES_ENDPOINT matching
+        api_lookup: dict[tuple[str, str], str] = {}
+        # Track first method for each API (for className/methodName on API node)
+        api_to_method: dict[str, tuple[str, str]] = {}  # api_id → (className, methodName)
+
+        if spring_endpoint_map:
+            for file_path, endpoints in spring_endpoint_map.items():
+                for method_name, http_method, http_path in endpoints:
+                    api_id = f"api:{http_method}:{http_path}"
+                    if api_id not in seen_api_ids:
+                        seen_api_ids.add(api_id)
+                        api_nodes.append({
+                            "id": api_id,
+                            "httpMethod": http_method,
+                            "httpPath": http_path,
+                            "httpParams": "",
+                            "className": "",
+                            "methodName": "",
+                            "filePath": file_path,
+                        })
+                        api_lookup[(http_method, http_path)] = api_id
+                        api_to_method[api_id] = ("", "")
+                    # EXPOSES: Method → API
+                    mid = method_ids.get((method_name, file_path))
+                    if mid:
+                        exposes_rels.append({"from_id": mid, "to_id": api_id, "confidence": 1.0})
+                        # Track the first method for this API
+                        if api_to_method[api_id][0] == "":
+                            full_name = method_name
+                            for pf in parsed_files:
+                                for m in pf.methods:
+                                    if m.name == method_name and m.file_path == file_path:
+                                        full_name = f"{m.class_name}.{method_name}" if m.class_name else method_name
+                                        break
+                            api_to_method[api_id] = (full_name.rsplit(".", 1)[0], full_name.rsplit(".", 1)[-1] if "." in full_name else full_name)
+
+        # Update API nodes with className/methodName from first exposed method
+        for api in api_nodes:
+            api_id = api["id"]
+            cn, mn = api_to_method.get(api_id, ("", ""))
+            api["className"] = cn
+            api["methodName"] = mn
+
+        if api_nodes:
+            store.bulk_copy_nodes("API", api_nodes)
+        if exposes_rels:
+            store.bulk_copy_relations(
+                "Method", "API", exposes_rels, "EXPOSES",
+                "controller method exposes HTTP endpoint",
+                extra_columns=["httpMethod", "httpPath", "httpParams"],
+            )
+        _step(f"API nodes done ({len(api_nodes)} APIs, {len(exposes_rels)} EXPOSES)")
+
         # 6. Write CALLS relations (deduplicate by caller_id + target_id)
         _step("Starting CALLS relations...")
 
@@ -753,21 +866,11 @@ def _write_to_graph_batched(
             )
         _step("CALLS done")
 
-        # 6b. Build USES_ENDPOINT relations: frontend methods → backend controller methods
-        # by matching HTTP method + path from JS/TS CALLS to Spring endpoints
-        _step("Building USES_ENDPOINT relations...")
+        # 6b. Build USES_ENDPOINT relations: frontend methods → API nodes
+        # by matching HTTP method + path from JS/TS CALLS to API nodes
+        _step("Building USES_ENDPOINT relations (frontend → API)...")
         uses_endpoint_rels: list[dict] = []
         seen_uses: set[tuple[str, str]] = set()
-
-        # Build reverse index: (http_method, http_path) → backend method_id
-        backend_endpoint_lookup: dict[tuple[str, str], str] = {}
-        if spring_endpoint_map:
-            for file_path, endpoints in spring_endpoint_map.items():
-                for method_name, (http_method, http_path) in endpoints.items():
-                    key = (http_method, http_path)
-                    mid = method_ids.get((method_name, file_path))
-                    if mid:
-                        backend_endpoint_lookup[key] = mid
 
         # Scan JS/TS CALLS relations for HTTP endpoint info
         for item in call_relations:
@@ -785,9 +888,9 @@ def _write_to_graph_batched(
             if not _is_js_ts_file(caller_file):
                 continue
 
-            # Look up matching backend method
-            backend_id = backend_endpoint_lookup.get((http_method, http_path))
-            if not backend_id:
+            # Look up matching API node by (http_method, http_path)
+            api_id = api_lookup.get((http_method, http_path))
+            if not api_id:
                 continue
 
             # Get caller method ID
@@ -795,27 +898,22 @@ def _write_to_graph_batched(
             if not caller_id:
                 continue
 
-            pair = (caller_id, backend_id)
+            pair = (caller_id, api_id)
             if pair not in seen_uses:
                 seen_uses.add(pair)
-                rel_data: dict = {
+                uses_endpoint_rels.append({
                     "from_id": caller_id,
-                    "to_id": backend_id,
+                    "to_id": api_id,
                     "confidence": 0.85,
                     "httpMethod": http_method or "",
                     "httpPath": http_path or "",
-                }
-                if http_params:
-                    rel_data["httpParams"] = http_params
-                else:
-                    rel_data["httpParams"] = ""
-                uses_endpoint_rels.append(rel_data)
+                    "httpParams": http_params or "",
+                })
 
         if uses_endpoint_rels:
-            # Always include all HTTP columns to match the fixed CodeRelation schema
             store.bulk_copy_relations(
-                "Method", "Method", uses_endpoint_rels, "USES_ENDPOINT",
-                "frontend → backend endpoint match",
+                "Method", "API", uses_endpoint_rels, "USES_ENDPOINT",
+                "frontend method uses backend API endpoint",
                 extra_columns=["httpMethod", "httpPath", "httpParams"],
             )
         _step(f"USES_ENDPOINT done ({len(uses_endpoint_rels)} relations)")
@@ -875,6 +973,202 @@ def _write_to_graph_batched(
                     })
         bw.insert_relations("File", "Class", imports_data, "IMPORTS", 1.0, "import relation")
         bw.insert_relations("File", "Interface", imports_data, "IMPORTS", 1.0, "import relation")
+
+
+def _to_setter_name(java_prop: str) -> str:
+    """Convert a JavaBean property name to its setter method name."""
+    if not java_prop:
+        return ""
+    first = java_prop[0].upper()
+    rest = java_prop[1:] if len(java_prop) > 1 else ""
+    return f"set{first}{rest}"
+
+
+def _to_getter_name(java_prop: str, is_boolean: bool = False) -> str:
+    """Convert a JavaBean property name to its getter method name."""
+    if not java_prop:
+        return ""
+    first = java_prop[0].upper()
+    rest = java_prop[1:] if len(java_prop) > 1 else ""
+    prefix = "is" if is_boolean else "get"
+    return f"{prefix}{first}{rest}"
+
+
+def _write_mybatis_relations(
+    store: GraphStore,
+    source_files,
+    parsed_files: list,
+) -> None:
+    """Parse MyBatis mapper XMLs and create MAPS_TO edges.
+    """
+    from .mybatis_parser import parse_mapper_xml
+
+    # === MyBatis MAPS_TO edges (Mapper.method → Entity/Field/setter) ===
+    xml_files = [sf for sf in source_files if sf.lang == "xml"]
+    if not xml_files:
+        return
+
+    mappers: list = []
+    for sf in xml_files:
+        info = parse_mapper_xml(sf.path)
+        if info:
+            info.source_file = sf.relative
+            mappers.append(info)
+
+    if not mappers:
+        return
+
+    # For each mapper, look up the interface node by namespace
+    maps_to_rels: list[dict] = []  # from_id=Method, to_id=Class/Field/Method(setter)
+
+    for mp in mappers:
+        namespace = mp.namespace
+        mapper_simple = namespace.rsplit(".", 1)[-1]
+
+        # Find the Mapper interface by FQN
+        iface_rows = store.query(
+            "MATCH (n:Interface) WHERE n.name = $name RETURN n.id AS id LIMIT 1",
+            {"name": namespace},
+        )
+        if not iface_rows:
+            iface_rows = store.query(
+                "MATCH (n:Interface) WHERE n.name CONTAINS $name RETURN n.id AS id, n.name AS nname LIMIT 1",
+                {"name": mapper_simple},
+            )
+        if not iface_rows:
+            continue
+
+        mapper_iface_id = iface_rows[0]["id"]
+
+        # Build resultMap lookup: id -> entity_fqn + properties
+        rm_lookup: dict[str, dict] = {}
+        for rm in mp.result_maps:
+            rm_lookup[rm.id] = {"entity_fqn": rm.entity_fqn, "props": rm.properties}
+
+        for stmt in mp.statements:
+            method_name = stmt.id
+
+            # Find the method on this Mapper interface
+            method_rows = store.query(
+                "MATCH (n:Method) WHERE n.name = $name AND n.className = $cls RETURN n.id AS id LIMIT 1",
+                {"name": method_name, "cls": mapper_simple},
+            )
+            if not method_rows:
+                continue
+
+            method_id = method_rows[0]["id"]
+
+            # Get entity from resultMap
+            entity_fqn = None
+            rm_data = None
+            if stmt.result_map and stmt.result_map in rm_lookup:
+                rm_data = rm_lookup[stmt.result_map]
+                entity_fqn = rm_data["entity_fqn"]
+            elif stmt.parameter_type and "." in stmt.parameter_type:
+                entity_fqn = stmt.parameter_type
+
+            if not entity_fqn:
+                continue
+
+            entity_simple = entity_fqn.rsplit(".", 1)[-1]
+
+            # Find the Entity class
+            entity_rows = store.query(
+                "MATCH (n:Class) WHERE n.name = $name RETURN n.id AS id LIMIT 1",
+                {"name": entity_fqn},
+            )
+            if not entity_rows:
+                entity_rows = store.query(
+                    "MATCH (n:Class) WHERE n.name CONTAINS $name RETURN n.id AS id, n.name AS nname LIMIT 1",
+                    {"name": entity_simple},
+                )
+            if entity_rows:
+                entity_id = entity_rows[0]["id"]
+                maps_to_rels.append({
+                    "from_id": method_id,
+                    "to_id": entity_id,
+                    "confidence": 0.95,
+                })
+
+            # Get field-level mappings and create MAPS_TO to setter methods
+            if rm_data:
+                for prop in rm_data["props"]:
+                    java_prop = prop.property
+                    if not java_prop:
+                        continue
+
+                    # Find the Field node
+                    field_rows = store.query(
+                        "MATCH (n:Field) WHERE n.name = $name AND n.className = $cls RETURN n.id AS id LIMIT 1",
+                        {"name": java_prop, "cls": entity_simple},
+                    )
+                    if not field_rows:
+                        field_rows = store.query(
+                            "MATCH (n:Field) WHERE n.name = $name AND n.className CONTAINS $cls "
+                            "RETURN n.id AS id LIMIT 1",
+                            {"name": java_prop, "cls": entity_simple},
+                        )
+                    if field_rows:
+                        maps_to_rels.append({
+                            "from_id": method_id,
+                            "to_id": field_rows[0]["id"],
+                            "confidence": 0.9,
+                        })
+
+                    # Find the setter Method node and create MAPS_TO
+                    setter_name = _to_setter_name(java_prop)
+                    setter_rows = store.query(
+                        "MATCH (n:Method) WHERE n.name = $name AND n.className = $cls RETURN n.id AS id LIMIT 1",
+                        {"name": setter_name, "cls": entity_simple},
+                    )
+                    if not setter_rows:
+                        setter_rows = store.query(
+                            "MATCH (n:Method) WHERE n.name = $name AND n.className CONTAINS $cls "
+                            "RETURN n.id AS id LIMIT 1",
+                            {"name": setter_name, "cls": entity_simple},
+                        )
+                    if setter_rows:
+                        maps_to_rels.append({
+                            "from_id": method_id,
+                            "to_id": setter_rows[0]["id"],
+                            "confidence": 0.9,
+                        })
+
+    # Write MAPS_TO relations
+    if maps_to_rels:
+        seen: set = set()
+        deduped: list[dict] = []
+        for r in maps_to_rels:
+            pair = (r["from_id"], r["to_id"])
+            if pair not in seen:
+                seen.add(pair)
+                r["httpMethod"] = ""
+                r["httpPath"] = ""
+                r["httpParams"] = ""
+                deduped.append(r)
+
+        # Write to Method→Method, Method→Class, Method→Field separately
+        method_to_method = [r for r in deduped if r["to_id"].startswith("Method_")]
+        if method_to_method:
+            store.bulk_copy_relations(
+                "Method", "Method", method_to_method, "MAPS_TO",
+                "MyBatis mapper method maps to entity method/field",
+                extra_columns=["httpMethod", "httpPath", "httpParams"],
+            )
+        method_to_class = [r for r in deduped if r["to_id"].startswith("Class_")]
+        if method_to_class:
+            store.bulk_copy_relations(
+                "Method", "Class", method_to_class, "MAPS_TO",
+                "MyBatis mapper method maps to entity class",
+                extra_columns=["httpMethod", "httpPath", "httpParams"],
+            )
+        method_to_field = [r for r in deduped if r["to_id"].startswith("Field_")]
+        if method_to_field:
+            store.bulk_copy_relations(
+                "Method", "Field", method_to_field, "MAPS_TO",
+                "MyBatis mapper method maps to entity field",
+                extra_columns=["httpMethod", "httpPath", "httpParams"],
+            )
 
 
 class BatchWriter:
@@ -1100,22 +1394,11 @@ def _make_enum_id(name: str, file_path: str, start_line: int = 0) -> str:
 
 def _build_spring_endpoint_map(
     parsed_files: list[ParsedFile],
-) -> dict[str, dict[str, tuple[str, str]]]:
-    """Build (file_path, method_name) → (http_method, http_path) from Spring annotations.
+) -> dict[str, list[tuple[str, str, str]]]:
+    """Build (file_path) → list of (method_name, http_method, http_path) from Spring annotations.
 
-    Extracts HTTP method from annotation name:
-    - @GetMapping → GET
-    - @PostMapping → POST
-    - @PutMapping → PUT
-    - @DeleteMapping → DELETE
-    - @PatchMapping → PATCH
-    - @RequestMapping → use "method" attribute if present, default to GET
-
-    Extracts path from annotation "path" or "value" attribute.
-    Also combines with class-level @RequestMapping prefix.
-
-    Returns:
-        {file_path: {method_name: (http_method, http_path), ...}, ...}
+    Returns a list (not dict) per file so duplicate method names don't overwrite each other.
+    Each tuple: (method_name, http_method, http_path)
     """
     # Annotation name → HTTP method mapping
     annotation_method_map = {
@@ -1126,7 +1409,7 @@ def _build_spring_endpoint_map(
         "PatchMapping": "PATCH",
     }
 
-    result: dict[str, dict[str, tuple[str, str]]] = {}
+    result: dict[str, list[tuple[str, str, str]]] = {}
 
     # First pass: find class-level @RequestMapping paths
     class_prefix: dict[str, str] = {}  # class_name → prefix_path
@@ -1146,7 +1429,7 @@ def _build_spring_endpoint_map(
 
     # Second pass: find method-level HTTP mapping annotations
     for pf in parsed_files:
-        endpoint_map: dict[str, tuple[str, str]] = {}
+        endpoints: list[tuple[str, str, str]] = []
         file_method_class = method_class_map.get(pf.file_path, {})
 
         for ann in pf.annotations:
@@ -1177,17 +1460,17 @@ def _build_spring_endpoint_map(
                         prefix = class_prefix[class_name]
                         full_path = prefix.rstrip("/") + "/" + path.lstrip("/")
 
-                    endpoint_map[ann.target_name] = (http_method, full_path)
+                    endpoints.append((ann.target_name, http_method, full_path))
 
-        if endpoint_map:
-            result[pf.file_path] = endpoint_map
+        if endpoints:
+            result[pf.file_path] = endpoints
 
     return result
 
 
 def _enrich_java_calls(
     call_relations: list[tuple],
-    spring_endpoint_map: dict[str, dict[str, tuple[str, str]]],
+    spring_endpoint_map: dict[str, list[tuple[str, str, str]]],
 ) -> list[tuple]:
     """Enrich Java CALLS relations with Spring endpoint info.
 
@@ -1205,12 +1488,15 @@ def _enrich_java_calls(
         caller, caller_file, target, target_file, confidence = item
 
         # Check if the target method is a Spring controller endpoint
-        endpoint_map = spring_endpoint_map.get(target_file, {})
-        if target in endpoint_map:
-            http_method, http_path = endpoint_map[target]
-            # Convert to 8-tuple
-            enriched.append((caller, caller_file, target, target_file, confidence, http_method, http_path, None))
-        else:
+        endpoint_list = spring_endpoint_map.get(target_file, [])
+        matched = False
+        for method_name, http_method, http_path in endpoint_list:
+            if method_name == target:
+                # Convert to 8-tuple
+                enriched.append((caller, caller_file, target, target_file, confidence, http_method, http_path, None))
+                matched = True
+                break
+        if not matched:
             enriched.append(item)
 
     return enriched

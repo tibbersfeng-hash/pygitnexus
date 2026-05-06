@@ -65,6 +65,9 @@ def _read_registry() -> dict:
             converted[entry["name"]] = entry
         _write_registry(converted)
         return converted
+    # Clean up legacy list-format keys (e.g. "repositories": [])
+    if isinstance(raw.get("repositories"), list):
+        del raw["repositories"]
     return raw
 
 
@@ -95,7 +98,7 @@ def unregister_repo(name: str) -> bool:
 def list_repos() -> list[RepoInfo]:
     """List all registered repositories."""
     registry = _read_registry()
-    return [RepoInfo(**_normalize_repo_data(v)) for k, v in registry.items() if k != "_groups"]
+    return [RepoInfo(**_normalize_repo_data(v)) for k, v in registry.items() if k != "_groups" and isinstance(v, dict)]
 
 
 def get_repo(name: str) -> RepoInfo | None:
@@ -103,7 +106,7 @@ def get_repo(name: str) -> RepoInfo | None:
     if name == "_groups":
         return None
     registry = _read_registry()
-    if name in registry:
+    if name in registry and isinstance(registry[name], dict):
         return RepoInfo(**_normalize_repo_data(registry[name]))
     return None
 

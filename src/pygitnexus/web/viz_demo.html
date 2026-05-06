@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>可视化组件对比 Demo</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #1a1a2e; color: #eee; padding: 20px; }
+        h1 { text-align: center; margin-bottom: 10px; font-size: 1.6rem; }
+        .subtitle { text-align: center; color: #888; margin-bottom: 24px; font-size: 0.9rem; }
+        .tabs { display: flex; gap: 8px; justify-content: center; margin-bottom: 16px; }
+        .tab { padding: 8px 24px; border-radius: 6px; border: 1px solid #444; background: transparent; color: #eee; cursor: pointer; font-size: 0.95rem; transition: all 0.2s; }
+        .tab:hover { border-color: #888; }
+        .tab.active { background: #6366f1; border-color: #6366f1; }
+        .demo-panel { display: none; background: #16213e; border-radius: 12px; padding: 20px; margin-bottom: 30px; border: 1px solid #333; }
+        .demo-panel.active { display: block; }
+        .demo-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+        .demo-title { font-size: 1.2rem; font-weight: 600; }
+        .demo-meta { display: flex; gap: 12px; }
+        .badge { padding: 3px 10px; border-radius: 12px; font-size: 0.75rem; background: #6366f133; color: #a5b4fc; border: 1px solid #6366f155; }
+        .badge.green { background: #10b98133; color: #6ee7b7; border-color: #10b98155; }
+        .badge.amber { background: #f59e0b33; color: #fcd34d; border-color: #f59e0b55; }
+        .canvas-wrap { background: #0f172a; border-radius: 8px; border: 1px solid #222; overflow: auto; }
+        .canvas-wrap .chart-area { width: 100%; min-height: 500px; }
+        .pros-cons { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+        .pros, .cons { padding: 12px; border-radius: 8px; font-size: 0.85rem; line-height: 1.7; }
+        .pros { background: #10b98111; border: 1px solid #10b98133; }
+        .cons { background: #ef444411; border: 1px solid #ef444433; }
+        .pros strong { color: #6ee7b7; }
+        .cons strong { color: #fca5a5; }
+        .pros li::marker { color: #6ee7b7; }
+        .cons li::marker { color: #fca5a5; }
+        .data-selector { display: flex; gap: 8px; justify-content: center; margin-bottom: 16px; }
+        .data-btn { padding: 5px 14px; border-radius: 4px; border: 1px solid #555; background: transparent; color: #ccc; cursor: pointer; font-size: 0.85rem; }
+        .data-btn.active { background: #4f46e5; border-color: #4f46e5; color: #fff; }
+        .data-btn:hover { border-color: #6366f1; }
+        .legend { display: flex; gap: 16px; justify-content: center; margin-top: 8px; flex-wrap: wrap; }
+        .legend-item { display: flex; align-items: center; gap: 5px; font-size: 0.8rem; color: #94a3b8; }
+        .legend-dot { width: 10px; height: 10px; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <h1>Call Chain 可视化组件对比</h1>
+    <p class="subtitle">同一份调用链数据，三种不同的渲染方式</p>
+
+    <div class="data-selector">
+        <button class="data-btn active" data-key="saveOrder">saveOrder (newbee-mall)</button>
+        <button class="data-btn" data-key="pluginEnabled">PluginServiceImpl.enabled (shenyu-admin)</button>
+    </div>
+
+    <div class="tabs">
+        <button class="tab active" data-tab="d3tree">D3 Tree</button>
+        <button class="tab" data-tab="echarts">ECharts Tree</button>
+        <button class="tab" data-tab="dagred3">Dagre-D3</button>
+    </div>
+
+    <!-- ====== D3 TREE (替代 Markmap) ====== -->
+    <div id="panel-d3tree" class="demo-panel active">
+        <div class="demo-header">
+            <span class="demo-title">D3 Tree (Reingold-Tilford)</span>
+            <div class="demo-meta">
+                <span class="badge">D3 v7 + 本地 static</span>
+                <span class="badge green">Zoom/Pan: d3-zoom</span>
+                <span class="badge">轻量，无额外依赖</span>
+            </div>
+        </div>
+        <div class="canvas-wrap">
+            <svg id="d3tree-area" class="chart-area"></svg>
+        </div>
+        <div class="pros-cons">
+            <div class="pros"><strong>优点</strong>
+                <ul>
+                    <li>D3 项目已有，无需额外 CDN</li>
+                    <li>经典的树形布局算法</li>
+                    <li>样式完全可控</li>
+                    <li>支持折叠/展开交互</li>
+                </ul>
+            </div>
+            <div class="cons"><strong>缺点</strong>
+                <ul>
+                    <li>仅支持树形结构</li>
+                    <li>需要手写布局代码</li>
+                    <li>大数据量需做虚拟滚动</li>
+                    <li>无法展示多父节点</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <!-- ====== ECHARTS TREE ====== -->
+    <div id="panel-echarts" class="demo-panel">
+        <div class="demo-header">
+            <span class="demo-title">ECharts Tree Series</span>
+            <div class="demo-meta">
+                <span class="badge">CDN: echarts.min.js</span>
+                <span class="badge green">Zoom/Pan: 内置 roam</span>
+                <span class="badge green">多种布局切换</span>
+</div>
+        </div>
+        <div class="canvas-wrap">
+            <div id="echarts-area" class="chart-area" style="height:500px;"></div>
+        </div>
+        <div class="pros-cons">
+            <div class="pros"><strong>优点</strong>
+                <ul>
+                    <li>内置滚轮缩放拖拽</li>
+                    <li>支持径向/正交/自上而下布局</li>
+                    <li>节点可折叠，样式丰富</li>
+                    <li>大数据量性能优秀</li>
+                </ul>
+            </div>
+            <div class="cons"><strong>缺点</strong>
+                <ul>
+                    <li>仅支持树形结构</li>
+                    <li>库体积较大 ~1MB</li>
+                    <li>无法展示多父节点</li>
+                    <li>配置项较多</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <!-- ====== DAGRE-D3 ====== -->
+    <div id="panel-dagred3" class="demo-panel">
+        <div class="demo-header">
+            <span class="demo-title">Dagre-D3</span>
+            <div class="demo-meta">
+                <span class="badge">CDN: dagre-d3 + d3</span>
+                <span class="badge green">Zoom/Pan: d3-zoom</span>
+                <span class="badge green">支持 DAG 多父节点</span>
+            </div>
+        </div>
+        <div class="canvas-wrap">
+            <svg id="dagred3-area" class="chart-area"></svg>
+        </div>
+        <div id="dagred3-legend" class="legend"></div>
+        <div class="pros-cons">
+            <div class="pros"><strong>优点</strong>
+                <ul>
+                    <li>支持 DAG 图（多父节点）</li>
+                    <li>自定义节点形状和 HTML</li>
+                    <li>有向图布局自动优化</li>
+                    <li>最适合复杂调用链</li>
+                </ul>
+            </div>
+            <div class="cons"><strong>缺点</strong>
+                <ul>
+                    <li>需要手动引入 d3 + d3-zoom</li>
+                    <li>样式需手写 CSS</li>
+                    <li>折叠交互需自行实现</li>
+                    <li>学习曲线稍陡</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <!-- CDN Scripts -->
+    <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dagre-d3@0.6.4/dist/dagre-d3.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+
+    <script>
+    // ==========================================
+    // Data
+    // ==========================================
+    const DATA = {
+        saveOrder: {
+            root: 'NewBeeMallOrderServiceImpl.saveOrder',
+            upstream: [
+                { name: 'login.html', via: 'USES_ENDPOINT', children: [
+                    { name: 'AdminController.login', via: 'CALLS (via Interface)', children: [
+                        { name: 'AdminUserService.login', via: 'IMPLEMENTS', children: [] }
+                    ]}
+                ]},
+                { name: 'order-settle.html', via: 'USES_ENDPOINT', children: [
+                    { name: 'OrderController.saveOrder', via: 'CALLS (via Interface)', children: [] }
+                ]}
+            ],
+            downstream: [
+                { name: 'NewBeeMallOrderMapper.insertSelective', via: 'CALLS', children: [{ name: 'tb_newbee_mall_order', via: 'SQL', children: [] }] },
+                { name: 'NewBeeMallOrderItemMapper.insertSelective', via: 'CALLS', children: [{ name: 'tb_newbee_mall_order_item', via: 'SQL', children: [] }] },
+                { name: 'NewBeeMallShoppingCartItemMapper.deleteByPrimaryKeys', via: 'CALLS', children: [{ name: 'tb_newbee_mall_shopping_cart_item', via: 'SQL', children: [] }] },
+                { name: 'RedisUtil.set', via: 'CALLS', children: [] },
+                { name: 'TransactionUtil.commit', via: 'CALLS', children: [] }
+            ]
+        },
+        pluginEnabled: {
+            root: 'PluginServiceImpl.enabled',
+            upstream: [
+                { name: 'PluginController.enabled', via: 'CALLS', children: [] },
+                { name: 'PluginController.batchEnable', via: 'CALLS', children: [] },
+                { name: 'PluginController.batchDisable', via: 'CALLS', children: [] },
+                { name: 'PluginController.sync', via: 'CALLS', children: [] },
+                { name: 'AuthListener.onApplicationEvent', via: 'CALLS', children: [] },
+                { name: 'PluginScheduler.scheduleCheck', via: 'CALLS', children: [] },
+                { name: 'HealthCheckServiceImpl.checkPlugin', via: 'CALLS', children: [] }
+            ],
+            downstream: [
+                { name: 'PluginMapper.selectById', via: 'CALLS', children: [{ name: 'tb_plugin', via: 'SQL', children: [] }] },
+                { name: 'PluginMapper.updateStatus', via: 'CALLS', children: [{ name: 'tb_plugin', via: 'SQL', children: [] }] },
+                { name: 'PluginMapper.updateEnabled', via: 'CALLS', children: [{ name: 'tb_plugin', via: 'SQL', children: [] }] },
+                { name: 'PluginMapper.selectAll', via: 'CALLS', children: [{ name: 'tb_plugin', via: 'SQL', children: [] }] },
+                { name: 'ResourceMapper.findByPluginId', via: 'CALLS', children: [{ name: 'tb_resource', via: 'SQL', children: [] }] },
+                { name: 'RuleMapper.findByPluginId', via: 'CALLS', children: [{ name: 'tb_rule', via: 'SQL', children: [] }] },
+                { name: 'SelectorMapper.findByPluginId', via: 'CALLS', children: [{ name: 'tb_selector', via: 'SQL', children: [] }] },
+                { name: 'PluginDataMapper.selectByPluginId', via: 'CALLS', children: [{ name: 'tb_plugin_data', via: 'SQL', children: [] }] },
+                { name: 'PluginHandler.handle', via: 'CALLS', children: [] },
+                { name: 'PluginLifecycle.onStart', via: 'CALLS', children: [] },
+                { name: 'PluginLifecycle.onStop', via: 'CALLS', children: [] },
+                { name: 'ApplicationEventPublisher.publish', via: 'CALLS', children: [] },
+                { name: 'RedisTemplate.opsForValue', via: 'CALLS', children: [] },
+                { name: 'StringUtils.isNotBlank', via: 'CALLS', children: [] },
+                { name: 'ListUtil.isEmpty', via: 'CALLS', children: [] },
+                { name: 'PluginPathUtil.getPath', via: 'CALLS', children: [] }
+            ]
+        }
+    };
+
+    let currentData = 'saveOrder';
+    let activeTab = 'd3tree';
+    let echartsChart = null;
+
+    // ==========================================
+    // Tab & data switching
+    // ==========================================
+    document.querySelectorAll('.tab').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.demo-panel').forEach(p => p.classList.remove('active'));
+            btn.classList.add('active');
+            activeTab = btn.dataset.tab;
+            document.getElementById(`panel-${activeTab}`).classList.add('active');
+            setTimeout(() => render(currentData), 50);
+        });
+    });
+
+    document.querySelectorAll('.data-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.data-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            currentData = btn.dataset.key;
+            render(currentData);
+        });
+    });
+
+    // ==========================================
+    // D3 Tree (Reingold-Tilford)
+    // ==========================================
+    function renderD3Tree(dataKey) {
+        const data = DATA[dataKey];
+        const svgEl = document.getElementById('d3tree-area');
+        svgEl.innerHTML = '';
+
+        const width = Math.max(svgEl.clientWidth || 1200, 1200);
+        const height = 500;
+
+        const treeLayout = d3.tree().size([height - 80, width - 300]).separation((a, b) => a.parent === b.parent ? 1.2 : 1.8);
+
+        // Build tree: root → Upstream/Downstream
+        const rootData = {
+            name: data.root,
+            type: 'root',
+            children: [
+                {
+                    name: 'Upstream',
+                    type: 'upstream',
+                    children: data.upstream.map(flattenToTree),
+                },
+                {
+                    name: 'Downstream',
+                    type: 'downstream',
+                    children: data.downstream.map(flattenToTree),
+                }
+            ]
+        };
+
+        function flattenToTree(item) {
+            return {
+                name: item.name,
+                type: item.via === 'USES_ENDPOINT' ? 'page' : (item.via && item.via.includes('SQL') ? 'sql' : 'node'),
+                children: item.children && item.children.length ? item.children.map(flattenToTree) : [],
+            };
+        }
+
+        const root = d3.hierarchy(rootData);
+        treeLayout(root);
+
+        const svg = d3.select(svgEl).attr('width', width).attr('height', height);
+        const g = svg.append('g').attr('transform', `translate(80, 40)`);
+
+        // Zoom
+        const zoom = d3.zoom().on('zoom', (e) => g.attr('transform', e.transform));
+        svg.call(zoom);
+
+        // Colors
+        const COLOR = {
+            root: '#6366f1', upstream: '#0ea5e9', downstream: '#10b981',
+            page: '#f59e0b', sql: '#a78bfa', node: '#94a3b8'
+        };
+
+        // Links
+        g.selectAll('.link')
+            .data(root.links())
+            .enter()
+            .append('path')
+            .attr('class', 'link')
+            .attr('d', d3.linkHorizontal()
+                .x(d => d.y)
+                .y(d => d.x))
+            .attr('fill', 'none')
+            .attr('stroke', '#374151')
+            .attr('stroke-width', 1.5);
+
+        // Nodes
+        const node = g.selectAll('.node')
+            .data(root.descendants())
+            .enter()
+            .append('g')
+            .attr('class', 'node')
+            .attr('transform', d => `translate(${d.y},${d.x})`);
+
+        node.append('circle')
+            .attr('r', d => d.depth === 0 ? 8 : 4)
+            .attr('fill', d => COLOR[d.data.type] || COLOR.node)
+            .attr('stroke', d => COLOR[d.data.type] || COLOR.node)
+            .attr('stroke-width', 2);
+
+        node.append('text')
+            .attr('dy', '0.31em')
+            .attr('x', d => d.children ? -12 : 12)
+            .attr('text-anchor', d => d.children ? 'end' : 'start')
+            .attr('fill', '#cbd5e1')
+            .attr('font-size', d => d.depth === 0 ? '13px' : '11px')
+            .attr('font-weight', d => d.depth <= 1 ? '600' : '400')
+            .text(d => d.data.name);
+
+        svgEl.setAttribute('width', width);
+        svgEl.setAttribute('height', height);
+
+        // Initial zoom to fit
+        setTimeout(() => {
+            svg.call(zoom.transform, d3.zoomIdentity.translate(30, 10).scale(0.7));
+        }, 50);
+    }
+
+    // ==========================================
+    // ECHARTS TREE
+    // ==========================================
+    function renderEcharts(dataKey) {
+        const data = DATA[dataKey];
+        const container = document.getElementById('echarts-area');
+
+        if (!echartsChart) {
+            echartsChart = echarts.init(container);
+        }
+
+        function toTree(items) {
+            return items.map(item => ({
+                name: item.name,
+                children: item.children && item.children.length ? toTree(item.children) : [],
+            }));
+        }
+
+        const option = {
+            backgroundColor: '#0f172a',
+            tooltip: { trigger: 'item', formatter: '{b}' },
+            series: [{
+                type: 'tree',
+                data: [{
+                    name: data.root,
+                    symbolSize: 14,
+                    itemStyle: { color: '#6366f1', borderColor: '#818cf8' },
+                    label: { fontSize: 14, fontWeight: 'bold', color: '#fff' },
+                    children: [
+                        {
+                            name: 'Upstream',
+                            symbolSize: 8,
+                            itemStyle: { color: '#0ea5e9' },
+                            label: { color: '#0ea5e9', fontSize: 13, fontWeight: 'bold' },
+                            children: toTree(data.upstream),
+                        },
+                        {
+                            name: 'Downstream',
+                            symbolSize: 8,
+                            itemStyle: { color: '#10b981' },
+                            label: { color: '#10b981', fontSize: 13, fontWeight: 'bold' },
+                            children: toTree(data.downstream),
+                        }
+                    ],
+                }],
+                orient: 'LR',
+                top: '5%',
+                left: '8%',
+                bottom: '5%',
+                right: '15%',
+                symbolSize: 8,
+                expandAndCollapse: true,
+                animationDuration: 400,
+                animationDurationUpdate: 500,
+                roam: true,
+                scaleLimit: { min: 0.2, max: 4 },
+                itemStyle: { color: '#6366f1', borderColor: '#818cf8' },
+                lineStyle: { color: '#374151', width: 1.5, curveness: 0.5 },
+                label: { position: 'left', verticalAlign: 'middle', align: 'right', fontSize: 11, color: '#cbd5e1' },
+                leaves: { label: { position: 'right', verticalAlign: 'middle', align: 'left' } },
+                emphasis: { focus: 'descendant', label: { color: '#fff' } },
+            }]
+        };
+
+        echartsChart.setOption(option, true);
+        setTimeout(() => echartsChart.resize(), 80);
+    }
+
+    // ==========================================
+    // DAGRE-D3
+    // ==========================================
+    function renderDagreD3(dataKey) {
+        const data = DATA[dataKey];
+        const svgEl = document.getElementById('dagred3-area');
+        const legendEl = document.getElementById('dagred3-legend');
+        svgEl.innerHTML = '';
+        legendEl.innerHTML = '';
+
+        const g = new dagreD3.graphlib.Graph({ directed: true, compound: false, multigraph: false });
+        g.setGraph({ rankdir: 'LR', nodesep: 18, ranksep: 60, marginx: 60, marginy: 30 });
+        g.setDefaultEdgeLabel(() => ({}));
+
+        const COLORS = {
+            root:   { fill: '#6366f1', stroke: '#818cf8', text: '#fff' },
+            upstream:{ fill: '#1e3a5f', stroke: '#0ea5e9', text: '#7dd3fc' },
+            downstream:{ fill: '#1a3a2a', stroke: '#10b981', text: '#6ee7b7' },
+            sql:    { fill: '#3b1f6e', stroke: '#a78bfa', text: '#c4b5fd' },
+        };
+
+        let nid = 0;
+        const nodeIds = {};
+
+        function addNode(name, type) {
+            if (!(name in nodeIds)) {
+                nodeIds[name] = `n${nid++}`;
+                const c = COLORS[type] || COLORS.upstream;
+                g.setNode(nodeIds[name], {
+                    label: name,
+                    style: `fill:${c.fill};stroke:${c.stroke};stroke-width:1.5px`,
+                    labelStyle: `fill:${c.text};font-size:11px;`,
+                    rx: 5, ry: 5,
+                    padding: 8,
+                });
+            }
+            return nodeIds[name];
+        }
+
+        function addEdge(fromId, toId, label) {
+            if (!g.hasEdge(fromId, toId)) {
+                g.setEdge(fromId, toId, {
+                    label: label || '',
+                    style: 'stroke:#4b5563;stroke-width:1.2px;fill:none',
+                    labelStyle: 'fill:#94a3b8;font-size:9px',
+                });
+            }
+        }
+
+        const rootId = addNode(data.root, 'root');
+
+        // UPSTREAM: root → caller chain (reversed from actual call direction)
+        // Visual: arrows go root → Controller → Page
+        function flattenChain(item) {
+            const r = [item];
+            if (item.children && item.children.length) r.push(...flattenChain(item.children[0]));
+            return r;
+        }
+
+        for (const item of data.upstream) {
+            const chain = flattenChain(item);
+            const reversed = [...chain].reverse();
+            let prev = rootId;
+            for (let i = 1; i < reversed.length; i++) {
+                const node = reversed[i];
+                const cid = addNode(node.name, 'upstream');
+                addEdge(prev, cid, node.via);
+                prev = cid;
+            }
+        }
+
+        // DOWNSTREAM: root → callee → table (normal call direction)
+        function addDownstream(items, parentId) {
+            for (const item of items) {
+                const type = item.via && item.via.includes('SQL') ? 'sql' : 'downstream';
+                const childId = addNode(item.name, type);
+                addEdge(parentId, childId, item.via);
+                if (item.children && item.children.length > 0) {
+                    addDownstream(item.children, childId);
+                }
+            }
+        }
+
+        addDownstream(data.downstream, rootId);
+
+        // Render
+        const svg = d3.select(svgEl);
+        const inner = svg.append('g');
+
+        const zoom = d3.zoom().on('zoom', (e) => {
+            inner.attr('transform', e.transform);
+        });
+        svg.call(zoom);
+
+        const render = new dagreD3.render();
+        render(svg, g);
+
+        setTimeout(() => {
+            const w = svgEl.clientWidth || 1200;
+            const h = 500;
+            const gw = g.graph().width || 800;
+            const gh = g.graph().height || 300;
+            const scale = Math.min(w / (gw + 100), h / (gh + 60), 1);
+            svg.call(zoom.transform, d3.zoomIdentity.translate(40, 20).scale(Math.max(scale, 0.35)));
+            svgEl.setAttribute('width', Math.max(gw + 100, w));
+            svgEl.setAttribute('height', Math.max(gh + 40, 500));
+        }, 100);
+
+        legendEl.innerHTML = `
+            <div class="legend-item"><span class="legend-dot" style="background:#6366f1"></span> 目标方法</div>
+            <div class="legend-item"><span class="legend-dot" style="background:#0ea5e9"></span> ↑ 上游调用者 (谁调用它)</div>
+            <div class="legend-item"><span class="legend-dot" style="background:#10b981"></span> ↓ 下游被调用 (它调用谁)</div>
+            <div class="legend-item"><span class="legend-dot" style="background:#a78bfa"></span> SQL / 表</div>
+        `;
+    }
+
+    // ==========================================
+    // Render dispatcher
+    // ==========================================
+    function render(dataKey) {
+        if (activeTab === 'd3tree') renderD3Tree(dataKey);
+        if (activeTab === 'echarts') renderEcharts(dataKey);
+        if (activeTab === 'dagred3') renderDagreD3(dataKey);
+    }
+
+    window.addEventListener('load', () => {
+        setTimeout(() => render(currentData), 200);
+    });
+
+    window.addEventListener('resize', () => {
+        if (echartsChart) echartsChart.resize();
+    });
+    </script>
+</body>
+</html>

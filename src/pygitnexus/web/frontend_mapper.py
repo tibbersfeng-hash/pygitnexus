@@ -437,7 +437,7 @@ def _infer_spring_data_method(method_name: str, table_map: dict, repo_name: str)
 
 
 def _build_backend_endpoints(store: Any) -> list[dict]:
-    """Load backend HTTP endpoints from knowledge graph.
+    """Load backend HTTP endpoints from knowledge graph API nodes.
 
     Returns list of { name, endpoints: [{ method, path, methodName }] }.
     """
@@ -465,26 +465,23 @@ def _build_backend_endpoints(store: Any) -> list[dict]:
             attrs = _parse_attrs(mp_result[0].get("attrs"))
             base_path = attrs.get("path", "") if isinstance(attrs, dict) else ""
 
+        # Query API nodes exposed by this controller
         ep_result = store.query(
-            "MATCH (a:Annotation)<-[r:CodeRelation]-(m:Method) "
-            "WHERE a.name IN ['GetMapping','PostMapping','PutMapping','DeleteMapping','PatchMapping'] "
-            "AND m.className = $simple "
-            "RETURN a.name AS httpAnn, a.attributes AS attrs, m.name AS methodName",
+            "MATCH (api:API)<-[r:CodeRelation {type: 'EXPOSES'}]-(m:Method) "
+            "WHERE m.className = $simple "
+            "RETURN api.httpMethod AS httpMethod, api.httpPath AS httpPath, m.name AS methodName",
             {"simple": simple_name},
         )
 
         endpoints = []
         for ep in ep_result:
-            attrs = _parse_attrs(ep.get("attrs"))
-            ep_path = attrs.get("path", "") if isinstance(attrs, dict) else ""
-            http_map = {"GetMapping": "GET", "PostMapping": "POST", "PutMapping": "PUT",
-                        "DeleteMapping": "DELETE", "PatchMapping": "PATCH"}
-            method = http_map.get(ep["httpAnn"], ep["httpAnn"])
+            ep_method = ep.get("httpMethod", "")
+            ep_path = ep.get("httpPath", "")
             full_path = base_path + ep_path if base_path else ep_path
             endpoints.append({
-                "method": method,
+                "method": ep_method,
                 "path": full_path,
-                "methodName": ep["methodName"],
+                "methodName": ep.get("methodName", ""),
             })
 
         backend_endpoints.append({
@@ -515,8 +512,10 @@ def _enrich_with_db_chain(store: Any, matched: list[dict]) -> list[dict]:
 def query_frontend_pages_single_repo(repo_path: str, store: Any) -> dict:
     """Single-repo frontend→backend mapping.
 
-    Uses USES_ENDPOINT relations from knowledge graph if available,
-    falls back to regex scanning of frontend files.
+    Uses USES_ENDPOINT relations through API nodes:
+    Frontend Method → USES_ENDPOINT → API ← EXPOSES ← Backend Method
+
+    Falls back to regex scanning of frontend files.
 
     Args:
         repo_path: Repository path.
@@ -525,14 +524,14 @@ def query_frontend_pages_single_repo(repo_path: str, store: Any) -> dict:
     Returns:
         Dict with mode, source, apiCalls, frontendPages, etc.
     """
-    # Check for USES_ENDPOINT relations
+    # Check for USES_ENDPOINT relations through API nodes
     uses_endpoint_rows = store.query(
-        "MATCH (fe:Method)-[r:CodeRelation]->(be:Method) "
-        "WHERE r.type = 'USES_ENDPOINT' "
+        "MATCH (fe:Method)-[r:CodeRelation {type: 'USES_ENDPOINT'}]->(api:API) "
+        "<-[r2:CodeRelation {type: 'EXPOSES'}]-(be:Method) "
         "RETURN fe.name AS feMethod, fe.className AS feClass, "
         "       fe.filePath AS feFile, be.name AS beMethod, "
         "       be.className AS beClass, be.filePath AS beFile, "
-        "       r.httpMethod AS httpMethod, r.httpPath AS httpPath, "
+        "       api.httpMethod AS httpMethod, api.httpPath AS httpPath, "
         "       r.confidence AS confidence "
         "ORDER BY fe.filePath, fe.name"
     )
@@ -544,7 +543,10 @@ def query_frontend_pages_single_repo(repo_path: str, store: Any) -> dict:
 
 
 def _handle_uses_endpoint(store: Any, uses_endpoint_rows: list[dict], repo_path: str) -> dict:
-    """Handle single-repo mode using USES_ENDPOINT relations."""
+    """Handle single-repo mode using USES_ENDPOINT relations.
+
+    New data model: Frontend Method → USES_ENDPOINT → API ← EXPOSES ← Backend Method
+    """
     backend_endpoints = _build_backend_endpoints(store)
 
     ctrl_to_tables: dict[str, set[str]] = {}
@@ -554,19 +556,43 @@ def _handle_uses_endpoint(store: Any, uses_endpoint_rows: list[dict], repo_path:
         ctrl_to_tables.setdefault(ctrl_key, set()).add(chain.get("table", ""))
         ctrl_to_service[ctrl_key] = chain.get("service", "")
 
+    # We need to enrich USES_ENDPOINT with API node info and EXPOSES chain
+    # Since the input rows may be from an older schema, handle both cases
     matched = []
     for row in uses_endpoint_rows:
         fe_file = row.get("feFile", "")
         fe_page = _guess_page_name_from_path(fe_file, repo_path)
-        be_class = row.get("beClass", "")
+        http_method = row.get("httpMethod", "")
+        http_path = row.get("httpPath", "")
+
+        # Try to find the exposed backend method via API node
+        be_class = ""
+        be_method = ""
+        if http_method and http_path:
+            expose_result = store.query(
+                "MATCH (api:API)<-[r:CodeRelation {type: 'EXPOSES'}]-(m:Method) "
+                "WHERE api.httpMethod = $hm AND api.httpPath = $hp "
+                "RETURN m.className AS className, m.name AS methodName LIMIT 1",
+                {"hm": http_method, "hp": http_path},
+            )
+            if expose_result:
+                be_class = expose_result[0].get("className", "")
+                be_method = expose_result[0].get("methodName", "")
+            else:
+                be_class = row.get("beClass", "")
+                be_method = row.get("beMethod", "")
+        else:
+            be_class = row.get("beClass", "")
+            be_method = row.get("beMethod", "")
+
         be_ctrl = be_class.split(".")[-1] if be_class else ""
 
         matched.append({
             "page": fe_page,
-            "httpMethod": row.get("httpMethod", ""),
-            "httpPath": row.get("httpPath", ""),
+            "httpMethod": http_method,
+            "httpPath": http_path,
             "controller": be_ctrl,
-            "controllerMethod": row.get("beMethod", ""),
+            "controllerMethod": be_method,
             "feFile": fe_file,
             "feMethod": row.get("feMethod", ""),
             "matchType": "USES_ENDPOINT",

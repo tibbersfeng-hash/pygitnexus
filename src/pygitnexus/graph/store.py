@@ -305,19 +305,20 @@ class GraphStore:
             {"name": name},
         )
 
-        # Also include frontend pages that USES_ENDPOINT to this backend method
+        # Include frontend pages that USES_ENDPOINT → API ← EXPOSES ← this backend method
         frontend_callers = self.query(
-            "MATCH (caller)-[r:CodeRelation {type: 'USES_ENDPOINT'}]->(target) "
+            "MATCH (caller:Method)-[r1:CodeRelation {type: 'USES_ENDPOINT'}]->(api:API) "
+            "<-[r2:CodeRelation {type: 'EXPOSES'}]-(target:Method) "
             "WHERE target.name = $name "
             "RETURN caller.name as caller, caller.className as callerClass, "
-            "r.confidence as confidence",
+            "r1.confidence as confidence",
             {"name": name},
         )
 
-        # Also try two-hop: HTML pages USES_ENDPOINT → Controller → CALLS → Interface
-        # This finds HTML pages that reach the target via Controller + Interface
+        # Also try three-hop: HTML pages USES_ENDPOINT → API ← EXPOSES ← Controller → CALLS → Interface
         ep_two_hop = self.query(
-            "MATCH (page:Method)-[r1:CodeRelation {type: 'USES_ENDPOINT'}]->(ctrl:Method)-[r2:CodeRelation {type: 'CALLS'}]->(iface:Method) "
+            "MATCH (page:Method)-[r1:CodeRelation {type: 'USES_ENDPOINT'}]->(api:API) "
+            "<-[r2:CodeRelation {type: 'EXPOSES'}]-(ctrl:Method)-[r3:CodeRelation {type: 'CALLS'}]->(iface:Method) "
             "WHERE iface.name = $name "
             "RETURN page.name as caller, page.className as callerClass, "
             "       ctrl.name as ctrlName, ctrl.className as ctrlClass, "

@@ -119,6 +119,16 @@ NODE_TABLES = [
         content STRING,
         PRIMARY KEY (id)
     )""",
+    """CREATE NODE TABLE API (
+        id STRING,
+        httpMethod STRING,
+        httpPath STRING,
+        httpParams STRING,
+        className STRING,
+        methodName STRING,
+        filePath STRING,
+        PRIMARY KEY (id)
+    )""",
 ]
 
 # Relation types
@@ -126,7 +136,8 @@ REL_TYPES = [
     "CONTAINS", "DEFINES", "CALLS", "IMPORTS",
     "EXTENDS", "IMPLEMENTS", "HAS_METHOD", "HAS_PROPERTY",
     "HAS_CONSTRUCTOR", "HAS_VARIABLE", "HAS_ANNOTATION",
-    "ACCESSES", "USES_ENDPOINT",
+    "ACCESSES", "USES_ENDPOINT", "EXPOSES",
+    "MAPS_TO", "HAS_SETTER", "HAS_GETTER",
 ]
 
 # Single CodeRelation table with type property
@@ -145,10 +156,12 @@ CREATE REL TABLE CodeRelation (
     FROM File TO Annotation,
     FROM File TO TypeAlias,
     FROM File TO Enum,
+    FROM File TO API,
     FROM Class TO Method,
     FROM Class TO Field,
     FROM Class TO Constructor,
     FROM Class TO Annotation,
+    FROM Class TO API,
     FROM Interface TO Method,
     FROM Interface TO Field,
     FROM Interface TO Annotation,
@@ -158,6 +171,8 @@ CREATE REL TABLE CodeRelation (
     FROM Method TO Variable,
     FROM Method TO Annotation,
     FROM Method TO Field,
+    FROM Method TO API,
+    FROM Field TO Method,
     FROM Constructor TO Method,
     FROM Constructor TO Constructor,
     FROM Constructor TO Variable,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -80,6 +81,95 @@ def _get_repo_param(request: Request) -> str | None:
     return os.environ.get("PYGITNEXUS_WEB_REPO")
 
 
+# ─── Frontend path fuzzy matching helpers ─────────────────────────────
+
+# Common frontend-only path prefixes to strip when matching backend APIs
+_FE_PREFIXES_TO_STRIP = ["/user/", "/client/", "/app/", "/mobile/", "/v1/", "/api/", "/api/v1/"]
+
+# Singular ↔ plural path normalization pairs
+_SINGULAR_PLURAL = {
+    "/order": "/orders",
+    "/orders": "/order",
+    "/address": "/addresses",
+    "/addresses": "/address",
+    "/item": "/items",
+    "/items": "/item",
+    "/product": "/products",
+    "/products": "/product",
+}
+
+
+def _normalize_path(path: str) -> str:
+    """Canonicalize a path for matching: strip prefixes, singularize."""
+    p = path
+    for prefix in _FE_PREFIXES_TO_STRIP:
+        if p.startswith(prefix):
+            p = p[len(prefix) - 1:]  # keep leading /
+            break
+    p = p.rstrip("/")
+    # Always singularize: map plural back to singular for canonical comparison
+    for sing, plur in _SINGULAR_PLURAL.items():
+        if p == plur or p.startswith(plur + "/"):
+            p = sing + p[len(plur):]
+            break
+    return p
+
+
+def _match_fe_call_to_backend(fe_method: str, fe_path: str, be_method: str, be_path: str) -> bool:
+    """Check if a frontend CALL matches a backend API node via fuzzy matching."""
+    if fe_method != be_method:
+        return False
+    # Exact match
+    if fe_path == be_path:
+        return True
+    # Canonical normalized match (both sides)
+    if _normalize_path(fe_path) == _normalize_path(be_path):
+        return True
+    # Suffix match: backend path is suffix of frontend path (e.g. fe=/user/login, be=/login)
+    if fe_path.endswith(be_path) and be_path.startswith("/"):
+        return True
+    # Suffix + normalized: frontend suffix matches normalized backend
+    if fe_path.endswith(_normalize_path(be_path)) and be_path.startswith("/"):
+        return True
+    return False
+
+
+def _query_frontend_pages(fe_store: GraphStore, backend_method: str, backend_path: str) -> list[dict]:
+    """Query frontend repo for CALLS relations that fuzzy-match a backend API.
+
+    Frontend KuzuDB stores HTTP calls as CALLS relations with httpMethod/httpPath
+    properties on the relation, not USES_ENDPOINT relations to API nodes.
+    """
+    # Fetch all CALLS relations that have HTTP info
+    fe_calls = fe_store.query(
+        "MATCH (page:Method)-[r:CodeRelation {type: 'CALLS'}]->(target:Method) "
+        "WHERE r.httpMethod IS NOT NULL AND r.httpPath IS NOT NULL "
+        "RETURN page.name AS pageName, page.filePath AS pageFile, "
+        "       r.httpMethod AS feMethod, r.httpPath AS fePath LIMIT 50"
+    )
+    results = []
+    for fc in fe_calls:
+        fe_m = fc.get("feMethod", "")
+        fe_p = fc.get("fePath", "")
+        if fe_m and fe_p and _match_fe_call_to_backend(fe_m, fe_p, backend_method, backend_path):
+            # Extract human-readable page name from file path
+            file_path = fc.get("pageFile", "")
+            if file_path:
+                # Use the filename as page name (e.g., "Login.vue")
+                display_page_name = Path(file_path).name
+            else:
+                display_page_name = fc["pageName"]
+            results.append({
+                "pageName": display_page_name,
+                "pageFile": file_path,
+                "feMethod": fc["pageName"],  # original function name
+                "pageClass": "",
+                "httpMethod": backend_method,
+                "httpPath": backend_path,
+            })
+    return results
+
+
 # ─── Routes ───────────────────────────────────────────────────────────
 
 async def dashboard(request: Request) -> HTMLResponse:
@@ -109,13 +199,21 @@ async def api_list_repos(request: Request) -> JSONResponse:
 
 
 async def api_stats(request: Request) -> JSONResponse:
+    group_param = request.query_params.get("group", "")
     repo = _get_repo_param(request)
+
+    if group_param:
+        return _stats_group(group_param)
+
+    if not repo:
+        return _err("No repository or group selected")
+
     store, _ = _load_store(repo)
     if store is None:
         return _err("No indexed repository found")
     try:
         node_counts = {}
-        for t in ["File", "Folder", "Class", "Interface", "Method", "Field"]:
+        for t in ["File", "Folder", "Class", "Interface", "Method", "Field", "API"]:
             result = store.query(f"MATCH (n:{t}) RETURN count(n) AS cnt")
             node_counts[t.lower()] = result[0]["cnt"] if result else 0
 
@@ -131,11 +229,102 @@ async def api_stats(request: Request) -> JSONResponse:
         store.close()
 
 
+def _get_group_info(group_name: str):
+    """Get group info from new group.yaml storage, falling back to legacy registry.json."""
+    # Try new group.yaml system first
+    from ..core.group.storage import get_group_dir, list_groups as list_group_dirs
+    from ..core.group.config_parser import parse_group_yaml
+    from ..storage.repo_manager import get_repo, get_group as get_legacy_group
+
+    available = list_group_dirs()
+    if group_name in available:
+        group_dir = get_group_dir(group_name)
+        try:
+            config = parse_group_yaml(os.path.join(group_dir, "group.yaml"))
+        except Exception:
+            pass
+        else:
+            # Convert GroupConfig to a GroupInfo-like object
+            repos = []
+            for role, reg_name in config.repos.items():
+                repo = get_repo(reg_name)
+                if repo:
+                    repos.append(type("Repo", (), {"name": reg_name, "path": repo.path, "role": role})())
+                else:
+                    repos.append(type("Repo", (), {"name": reg_name, "path": "", "role": role})())
+            return type("Group", (), {"name": config.name, "label": config.description or config.name, "repos": repos})()
+
+    # Fallback to legacy registry.json
+    return get_legacy_group(group_name)
+
+
+def _auto_detect_group(repo_path: str):
+    """Find a group that contains the given repo and has a frontend role."""
+    from ..core.group.storage import get_group_dir, list_groups as list_group_dirs
+    from ..core.group.config_parser import parse_group_yaml
+    from ..storage.repo_manager import get_repo
+
+    for group_name in list_group_dirs():
+        group = _get_group_info(group_name)
+        if group:
+            for r in group.repos:
+                if r.path and repo_path and (r.path == repo_path or repo_path.startswith(r.path)):
+                    # Check if group has a frontend repo
+                    has_frontend = any(fe.role == "frontend" for fe in group.repos)
+                    if has_frontend:
+                        return group
+    return None
+
+
+def _stats_group(group_name: str) -> JSONResponse:
+    group = _get_group_info(group_name)
+    if group is None:
+        return _err(f"Group '{group_name}' not found")
+
+    backend_repos = [r for r in group.repos if r.role == "backend"]
+    total_nodes: dict[str, int] = {}
+    total_rels: dict[str, int] = {}
+
+    for repo_info in backend_repos:
+        db_path = Path(repo_info.path) / ".pygitnexus" / "kuzu"
+        if not db_path.exists():
+            continue
+        store = GraphStore(db_path)
+        try:
+            for t in ["File", "Folder", "Class", "Interface", "Method", "Field", "API"]:
+                result = store.query(f"MATCH (n:{t}) RETURN count(n) AS cnt")
+                cnt = result[0]["cnt"] if result else 0
+                key = t.lower()
+                total_nodes[key] = total_nodes.get(key, 0) + cnt
+
+            rel_result = store.query(
+                "MATCH ()-[r:CodeRelation]->() RETURN r.type AS type, count(r) AS cnt"
+            )
+            for r in rel_result:
+                total_rels[r["type"]] = total_rels.get(r["type"], 0) + r["cnt"]
+        except Exception:
+            pass
+        finally:
+            store.close()
+
+    return _ok({"nodes": total_nodes, "relations": total_rels})
+
+
 async def api_query(request: Request) -> JSONResponse:
+    """Search symbols — supports single-repo and group (cross-repo) mode.
+
+    In group mode, searches all backend repos' knowledge graphs and
+    also scans frontend repo files for Vue/JS/TS symbols.
+    """
     keyword = request.query_params.get("q", "")
     if not keyword:
         return _err("Missing 'q' parameter")
     limit = int(request.query_params.get("limit", "50"))
+    group_param = request.query_params.get("group", "")
+
+    if group_param:
+        return _query_group(keyword, limit, group_param)
+
     repo = _get_repo_param(request)
     store, _ = _load_store(repo)
     if store is None:
@@ -149,16 +338,715 @@ async def api_query(request: Request) -> JSONResponse:
         store.close()
 
 
+def _query_group(keyword: str, limit: int, group_name: str) -> JSONResponse:
+    """Search across all repos in a group — backend graph + frontend scan."""
+    group = _get_group_info(group_name)
+    if group is None:
+        return _err(f"Group '{group_name}' not found")
+
+    all_results: list[dict] = []
+    stores: list[GraphStore] = []
+
+    # Search backend repos
+    backend_repos = [r for r in group.repos if r.role == "backend"]
+    if not backend_repos:
+        return _err(f"Group '{group_name}' has no backend repo")
+
+    for repo_info in backend_repos:
+        db_path = Path(repo_info.path) / ".pygitnexus" / "kuzu"
+        if not db_path.exists():
+            continue
+        store = GraphStore(db_path)
+        stores.append(store)
+        try:
+            results = graph_query(store, keyword, limit=limit)
+            for r in results:
+                r["source"] = repo_info.name
+                r["sourceRole"] = "backend"
+            all_results.extend(results)
+        except Exception:
+            # Skip repos with schema differences or corrupted DBs
+            pass
+
+    # Close backend stores
+    for s in stores:
+        s.close()
+
+    # Scan frontend repo for symbols (components, functions, API calls)
+    frontend_repos = [r for r in group.repos if r.role == "frontend"]
+    if frontend_repos:
+        fe_repo = frontend_repos[0]
+        fe_symbols = _scan_frontend_symbols(fe_repo.path, keyword, limit)
+        for s in fe_symbols:
+            s["source"] = fe_repo.name
+            s["sourceRole"] = "frontend"
+        all_results.extend(fe_symbols)
+
+    # Deduplicate by (name, type, filePath) and sort
+    seen = set()
+    deduped: list[dict] = []
+    for r in all_results:
+        key = (r.get("name", ""), r.get("types", ""), r.get("filePath", ""))
+        if key not in seen:
+            seen.add(key)
+            deduped.append(r)
+
+    # Limit total results
+    deduped = deduped[:limit]
+
+    return _ok(deduped)
+
+
+def _scan_frontend_symbols(frontend_path: str, keyword: str, limit: int) -> list[dict]:
+    """Scan Vue/JS/TS files for symbols matching the keyword.
+
+    Returns results compatible with graph_query output format:
+    { types, name, className, filePath, startLine, source, sourceRole }
+
+    Scans for:
+    - File names (e.g., Cart.vue)
+    - Vue component names (name: 'XxxPage')
+    - Exported functions/variables
+    - API call paths (axios.get, fetch, etc.)
+    - Import statements
+    - Router path definitions (path: '/login' -> Login.vue)
+    - Dynamic Vue page imports (import('@/views/Login.vue'))
+    - Vue <template> text content
+    """
+    import re
+    from pathlib import Path as _Path
+
+    root = _Path(frontend_path)
+    if not root.is_dir():
+        return []
+
+    results: list[dict] = []
+    kw_lower = keyword.lower()
+    extensions = {".vue", ".js", ".ts", ".jsx", ".tsx"}
+    skip_dirs = {"node_modules", "dist", "build", "vendor", ".git"}
+
+    # Pass 1: Scan all files for standard patterns
+    for ext in extensions:
+        for fp in root.rglob(f"*{ext}"):
+            if any(skip in str(fp) for skip in skip_dirs):
+                continue
+
+            stem = fp.stem
+            rel_path = str(fp.relative_to(root))
+
+            # Match filename (e.g., Cart.vue → matches "Cart", "cart")
+            if kw_lower in stem.lower():
+                results.append({
+                    "types": "File",
+                    "name": stem + ext,
+                    "className": "",
+                    "filePath": rel_path,
+                    "startLine": None,
+                })
+
+            try:
+                content = fp.read_text(errors="replace")
+            except (OSError, PermissionError):
+                continue
+
+            lines = content.splitlines()
+
+            for i, line_text in enumerate(lines, 1):
+                # Match Vue component names: export default { name: 'XxxPage' }
+                for m in re.finditer(
+                    r"""name\s*:\s*['"]([^'"]+)['"]""", line_text,
+                ):
+                    component_name = m.group(1)
+                    if kw_lower in component_name.lower():
+                        results.append({
+                            "types": "Component",
+                            "name": component_name,
+                            "className": "",
+                            "filePath": rel_path,
+                            "startLine": i,
+                        })
+
+                # Match exported functions: export const xxx = (...) => or export function xxx
+                for m in re.finditer(
+                    r"""export\s+(?:const|function|let|var)\s+(\w+)""", line_text,
+                ):
+                    func_name = m.group(1)
+                    if kw_lower in func_name.lower():
+                        results.append({
+                            "types": "Function",
+                            "name": func_name,
+                            "className": "",
+                            "filePath": rel_path,
+                            "startLine": i,
+                        })
+
+                # Match API call paths: axios.get('/api/xxx'), fetch('/api/xxx')
+                for m in re.finditer(
+                    r"""(?:axios|request|http|api|client)\.(?:get|post|put|delete|patch|request)\s*\(\s*['"`]([^'"`]+)['"`]""",
+                    line_text, re.IGNORECASE,
+                ):
+                    api_path = m.group(1)
+                    if kw_lower in api_path.lower():
+                        page_name = fp.stem
+                        results.append({
+                            "types": "APIPath",
+                            "name": api_path,
+                            "className": page_name,
+                            "filePath": rel_path,
+                            "startLine": i,
+                        })
+
+                # Match import statements with keyword
+                for m in re.finditer(
+                    r"""import\s+.*?['"]([^'"]+)['"]""", line_text,
+                ):
+                    import_path = m.group(1)
+                    if kw_lower in import_path.lower():
+                        results.append({
+                            "types": "Import",
+                            "name": import_path,
+                            "className": "",
+                            "filePath": rel_path,
+                            "startLine": i,
+                        })
+
+    # Pass 2: Parse router files for route path → page mappings
+    # Look for files named router/index.js, router.js, routes.js, etc.
+    router_patterns = ["**/router/index.js", "**/router/index.ts",
+                       "**/router.js", "**/router.ts",
+                       "**/routes.js", "**/routes.ts"]
+    for pattern in router_patterns:
+        for router_file in root.glob(pattern):
+            if not router_file.is_file():
+                continue
+            try:
+                router_content = router_file.read_text(errors="replace")
+            except (OSError, PermissionError):
+                continue
+
+            # Extract route definitions: { path: '/login', name: 'login', component: () => import('@/views/Login.vue') }
+            # Match path + component pairs on same or nearby lines
+            route_blocks = re.findall(
+                r"path\s*:\s*['\"]([^'\"]+)['\"]"
+                r".*?"
+                r"(?:name\s*:\s*['\"]([^'\"]+)['\"])?"
+                r".*?"
+                r"(?:"
+                    r"component\s*:\s*\(\)\s*=>\s*import\s*\(\s*['\"]([^'\"]+)['\"]\s*\)"
+                    r"|"
+                    r"component\s*:\s*(\w+)"
+                r")",
+                router_content,
+                re.DOTALL | re.IGNORECASE,
+            )
+            for path_val, name_val, dynamic_import, static_component in route_blocks:
+                # Determine the component file from dynamic import or static reference
+                component_file = dynamic_import or static_component
+                if component_file:
+                    # Resolve alias like @/views/Login.vue → views/Login.vue
+                    resolved_path = component_file.replace("@/", "").replace("~/", "")
+                    # Extract page name from component path
+                    page_name = _Path(resolved_path).stem
+
+                    # Match keyword against route path, route name, or page name
+                    searchable_values = [path_val, name_val or "", page_name, resolved_path]
+                    if any(kw_lower in v.lower() for v in searchable_values):
+                        results.append({
+                            "types": "Page",
+                            "name": f"{page_name} ({path_val})",
+                            "className": name_val or "",
+                            "filePath": str(router_file.relative_to(root)),
+                            "startLine": None,
+                        })
+
+    # Pass 3: Scan for dynamic Vue page imports across all JS/TS files
+    # Pattern: import('@/views/Login.vue') or import("../views/Login.vue")
+    for ext in {".js", ".ts", ".jsx", ".tsx"}:
+        for fp in root.rglob(f"*{ext}"):
+            if any(skip in str(fp) for skip in skip_dirs):
+                continue
+            try:
+                content = fp.read_text(errors="replace")
+            except (OSError, PermissionError):
+                continue
+            rel_path = str(fp.relative_to(root))
+
+            for m in re.finditer(
+                r"""import\s*\(\s*['"]([^'"']*?/([^/'"]+)\.vue)['"]\s*\)""", content,
+            ):
+                full_import = m.group(1)
+                vue_file = m.group(2)
+                if kw_lower in vue_file.lower() or kw_lower in full_import.lower():
+                    results.append({
+                        "types": "Page",
+                        "name": f"{vue_file} (via {full_import})",
+                        "className": "",
+                        "filePath": rel_path,
+                        "startLine": None,
+                    })
+
+    # Pass 4: Scan Vue <template> sections for keyword in text content
+    for fp in root.rglob("*.vue"):
+        if any(skip in str(fp) for skip in skip_dirs):
+            continue
+        try:
+            content = fp.read_text(errors="replace")
+        except (OSError, PermissionError):
+            continue
+        rel_path = str(fp.relative_to(root))
+
+        # Extract <template>...</template> content
+        template_match = re.search(r"<template[^>]*>(.*?)</template>", content, re.DOTALL)
+        if template_match:
+            template_content = template_match.group(1)
+            # Check for keyword in visible text (strip HTML tags for text matching)
+            text_content = re.sub(r"<[^>]+>", " ", template_content)
+            if kw_lower in text_content.lower():
+                # Find the line number where keyword appears
+                line_num = None
+                for li, lt in enumerate(template_content.splitlines(), 1):
+                    if kw_lower in lt.lower():
+                        line_num = li
+                        break
+                stem = fp.stem
+                results.append({
+                    "types": "Page",
+                    "name": f"{stem} (template content)",
+                    "className": "",
+                    "filePath": rel_path,
+                    "startLine": line_num,
+                })
+
+    return results
+
 async def api_symbol(request: Request) -> JSONResponse:
     name = request.query_params.get("name", "")
     if not name:
         return _err("Missing 'name' parameter")
+    class_param = request.query_params.get("class", "")
     repo = _get_repo_param(request)
-    store, _ = _load_store(repo)
+    store, repo_root = _load_store(repo)
     if store is None:
         return _err("No indexed repository found")
+    # Auto-detect group for frontend repo querying (same as api_mindmap)
+    group_param = ""
+    if repo_root:
+        auto_group = _auto_detect_group(str(repo_root))
+        if auto_group:
+            group_param = auto_group.name
     try:
-        ctx = symbol_context(store, name)
+        # Parse "ClassName.methodName" format for precise filtering
+        method_name = name
+        class_filter = ""
+        if "." in name:
+            parts = name.rsplit(".", 1)
+            class_filter = parts[0]
+            method_name = parts[1]
+
+        # Use class_param as fallback for class_filter
+        if not class_filter and class_param:
+            class_filter = class_param
+
+        # Use the same approach as api_mindmap: find the exact method first
+        if class_filter:
+            rows = store.query(
+                "MATCH (n:Method) WHERE n.name = $name AND n.className CONTAINS $cls "
+                "RETURN n.name AS name, n.className AS className LIMIT 5",
+                {"name": method_name, "cls": class_filter},
+            )
+        else:
+            rows = store.query(
+                "MATCH (n:Method) WHERE n.name = $name "
+                "RETURN n.name AS name, n.className AS className LIMIT 5",
+                {"name": method_name},
+            )
+        if not rows:
+            # Fall back to generic symbol_context (for non-Method symbols)
+            ctx = symbol_context(store, name)
+            return _ok(ctx)
+
+        # Prefer ServiceImpl, then Service, then exact class_filter match
+        row = rows[0]
+        for r in rows:
+            if "ServiceImpl" in r["className"] or "ServiceImpl" in (r.get("className") or ""):
+                row = r
+                break
+        else:
+            for r in rows:
+                if "Service" in r["className"] and "Impl" not in r.get("className", ""):
+                    row = r
+                    break
+            else:
+                # Fallback: exact class_filter match
+                for r in rows:
+                    if r["className"] == class_filter:
+                        row = r
+                        break
+
+        actual_class = row["className"]
+        actual_name = row["name"]
+
+        # Check if this is an Impl class → find Interface via IMPLEMENTS
+        impl_iface = None
+        impl_iface_short = None
+        iface_rows = store.query(
+            "MATCH (c:Class)-[r]->(t) "
+            "WHERE c.name CONTAINS $cls AND r.type = 'IMPLEMENTS' RETURN t.name AS ifaceName LIMIT 1",
+            {"cls": actual_class},
+        )
+        if iface_rows:
+            impl_iface = iface_rows[0]["ifaceName"]
+            impl_iface_short = impl_iface.split(".")[-1]
+
+        # Query callers/callees with precise class+name filtering (same as api_mindmap)
+        # CALLS callers: methods that call this method directly
+        callers = store.query(
+            "MATCH (caller:Method)-[r:CodeRelation {type: 'CALLS'}]->(target:Method) "
+            "WHERE target.name = $method AND target.className = $cls "
+            "RETURN caller.name AS caller, caller.className AS callerClass, r.confidence AS confidence",
+            {"method": actual_name, "cls": actual_class},
+        )
+
+        # If target is an Impl, also find callers that call via the Interface
+        iface_callers = []
+        if impl_iface_short:
+            iface_callers = store.query(
+                "MATCH (caller:Method)-[r:CodeRelation {type: 'CALLS'}]->(target:Method) "
+                "WHERE target.name = $method AND target.className = $iface "
+                "RETURN caller.name AS caller, caller.className AS callerClass, r.confidence AS confidence",
+                {"method": actual_name, "iface": impl_iface_short},
+            )
+
+        # USES_ENDPOINT callers (frontend pages) — include file path and API info
+        frontend_callers = store.query(
+            "MATCH (caller:Method)-[r1:CodeRelation {type: 'USES_ENDPOINT'}]->(api:API) "
+            "<-[r2:CodeRelation {type: 'EXPOSES'}]-(target:Method) "
+            "WHERE target.name = $method AND target.className = $cls "
+            "RETURN caller.name AS caller, caller.className AS callerClass, "
+            "       caller.filePath AS callerFile, "
+            "       api.httpMethod AS httpMethod, api.httpPath AS httpPath, "
+            "       r1.confidence AS confidence",
+            {"method": actual_name, "cls": actual_class},
+        )
+
+        # Three-hop: HTML pages → USES_ENDPOINT → API ← EXPOSES ← Controller → CALLS → Interface
+        ep_two_hop = store.query(
+            "MATCH (page:Method)-[r1:CodeRelation {type: 'USES_ENDPOINT'}]->(api:API) "
+            "<-[r2:CodeRelation {type: 'EXPOSES'}]-(ctrl:Method)-[r3:CodeRelation {type: 'CALLS'}]->(iface:Method) "
+            "WHERE iface.name = $method AND iface.className = $iface "
+            "RETURN page.name AS caller, page.className AS callerClass, "
+            "       page.filePath AS callerFile, "
+            "       ctrl.name AS ctrlName, ctrl.className AS ctrlClass, "
+            "       api.httpMethod AS httpMethod, api.httpPath AS httpPath, "
+            "       r1.confidence AS confidence",
+            {"method": actual_name, "iface": impl_iface_short or actual_class},
+        )
+
+        # Also query frontend repo for USES_ENDPOINT connections (group mode, same as api_mindmap)
+        if group_param and impl_iface_short:
+            group = _get_group_info(group_param)
+            if group:
+                for fe_repo in group.repos:
+                    if fe_repo.role == "frontend":
+                        fe_db = Path(fe_repo.path) / ".pygitnexus" / "kuzu"
+                        if fe_db.exists():
+                            try:
+                                fe_store = GraphStore(fe_db)
+                                # Get all API nodes exposed by Controllers that call the Interface
+                                api_rows = store.query(
+                                    "MATCH (ctrl:Method)-[r1:CodeRelation {type: 'EXPOSES'}]->(api:API), "
+                                    "(ctrl:Method)-[r2:CodeRelation {type: 'CALLS'}]->(iface:Method) "
+                                    "WHERE iface.className = $iface AND iface.name = $method "
+                                    "RETURN api AS apiNode, ctrl.className AS ctrlClass, ctrl.name AS ctrlName LIMIT 20",
+                                    {"iface": impl_iface_short, "method": actual_name},
+                                )
+                                for api_row in api_rows:
+                                    api_node = api_row.get("apiNode", {})
+                                    hm = api_node.get("httpMethod", "") if isinstance(api_node, dict) else ""
+                                    hp = api_node.get("httpPath", "") if isinstance(api_node, dict) else ""
+                                    ctrl_cls = api_row.get("ctrlClass", "")
+                                    ctrl_name = api_row.get("ctrlName", "")
+                                    if hm and hp:
+                                        fe_matches = _query_frontend_pages(fe_store, hm, hp)
+                                        for fm in fe_matches:
+                                            ep_two_hop.append({
+                                                "caller": fm["pageName"],
+                                                "callerClass": "",
+                                                "ctrlName": ctrl_name,
+                                                "ctrlClass": ctrl_cls,
+                                                "confidence": fm.get("confidence"),
+                                                "feMethod": fm.get("feMethod", ""),
+                                                "httpMethod": fm.get("httpMethod", ""),
+                                                "httpPath": fm.get("httpPath", ""),
+                                            })
+                                fe_store.close()
+                            except Exception:
+                                pass
+
+        # Build hierarchical callers
+        # ECharts BT (bottom-to-top) renders children ABOVE parent.
+        # We want to visually show: Login.vue(top) → POST /login → onSubmit → PersonalController.login(bottom)
+        # Since children render above parent, we need: Controller(outer) → API → function → page(inner/leaf)
+        page_map: dict[str, dict] = {}
+
+        # Three-hop: build inverted tree Controller → API → function → page
+        for fc in (ep_two_hop or []):
+            ctrl_key = f"{fc['ctrlClass']}.{fc['ctrlName']}"
+            caller_file = fc.get("callerFile", "")
+            display_page = Path(caller_file).name if caller_file else fc["caller"]
+            fe_method = fc.get("feMethod", "")
+            http_method = fc.get("httpMethod", "")
+            http_path = fc.get("httpPath", "")
+
+            if ctrl_key not in page_map:
+                page_map[ctrl_key] = {
+                    "caller": fc["ctrlName"],
+                    "callerClass": fc.get("ctrlClass", ""),
+                    "confidence": fc.get("confidence"),
+                    "relType": "CALLS (via Interface)",
+                    "children": [],
+                }
+
+            ctrl_children = page_map[ctrl_key]["children"]
+
+            # Inverted: Controller(outer) → API → function → page(inner/leaf)
+            # ECharts BT will render page at top, Controller at bottom
+            page_node = {
+                "caller": display_page,
+                "callerClass": "",
+                "confidence": None,
+                "relType": "USES_ENDPOINT",
+                "children": [],
+            }
+
+            if http_method and http_path:
+                api_label = f"{http_method} {http_path}"
+                api_node = {
+                    "caller": api_label,
+                    "callerClass": "",
+                    "confidence": None,
+                    "relType": "EXPOSES",
+                    "is_api": True,
+                    "children": [],
+                }
+
+                # function → page (leaf)
+                if fe_method and fe_method != display_page:
+                    func_node = {
+                        "caller": fe_method,
+                        "callerClass": fc.get("callerClass"),
+                        "confidence": None,
+                        "relType": "CALLS",
+                        "children": [page_node],
+                    }
+                    api_node["children"].append(func_node)
+                else:
+                    api_node["children"].append(page_node)
+
+                # Controller → API
+                if not any(ch.get("caller") == api_label for ch in ctrl_children):
+                    ctrl_children.append(api_node)
+            else:
+                if not any(ch.get("caller") == display_page for ch in ctrl_children):
+                    ctrl_children.append(page_node)
+
+        # Direct USES_ENDPOINT callers — with page → function → API structure
+        for fc in (frontend_callers or []):
+            # Use file path to get display page name
+            caller_file = fc.get("callerFile", "")
+            display_name = Path(caller_file).name if caller_file else fc["caller"]
+            fe_method = fc["caller"]
+            page_key = display_name
+            http_method = fc.get("httpMethod", "")
+            http_path = fc.get("httpPath", "")
+
+            # Check if already a child of any Controller
+            already_child = any(
+                any(ch.get("caller") == display_name for ch in pm.get("children", []))
+                for pm in page_map.values()
+            )
+            if already_child:
+                continue
+            if page_key in page_map:
+                continue
+
+            page_map[page_key] = {
+                "caller": display_name,
+                "callerClass": fc.get("callerClass", ""),
+                "confidence": fc.get("confidence"),
+                "relType": "USES_ENDPOINT",
+                "children": [],
+            }
+
+            # Add API node and function under page
+            if http_method and http_path:
+                api_label = f"{http_method} {http_path}"
+                api_entry = {
+                    "caller": api_label,
+                    "callerClass": "",
+                    "confidence": None,
+                    "relType": "EXPOSES",
+                    "is_api": True,
+                    "children": [],
+                }
+                page_map[page_key]["children"].append(api_entry)
+
+                if fe_method and fe_method != display_name:
+                    api_entry["children"].append({
+                        "caller": fe_method,
+                        "callerClass": fc["callerClass"],
+                        "confidence": None,
+                        "relType": "CALLS",
+                        "children": [],
+                    })
+
+        # Java CALLS callers (direct)
+        for c in callers:
+            key = f"{c['callerClass']}.{c['caller']}" if c.get('callerClass') else c['caller']
+            already_in_page = any(
+                any(ch.get("callerClass") == c.get("callerClass") and ch.get("caller") == c["caller"]
+                    for ch in pm.get("children", []))
+                for pm in page_map.values()
+            )
+            if not already_in_page and key not in page_map:
+                page_map[key] = {
+                    "caller": c["caller"],
+                    "callerClass": c.get("callerClass", ""),
+                    "confidence": c.get("confidence"),
+                    "children": [],
+                }
+
+        # Java CALLS callers via Interface
+        for c in (iface_callers or []):
+            key = f"{c['callerClass']}.{c['caller']}" if c.get('callerClass') else c['caller']
+            already_in_page = any(
+                any(ch.get("callerClass") == c.get("callerClass") and ch.get("caller") == c["caller"]
+                    for ch in pm.get("children", []))
+                for pm in page_map.values()
+            )
+            if not already_in_page and key not in page_map:
+                page_map[key] = {
+                    "caller": c["caller"],
+                    "callerClass": c.get("callerClass", ""),
+                    "confidence": c.get("confidence"),
+                    "children": [],
+                }
+
+        # MAPS_TO callers: MyBatis Mapper methods that map to this setter/getter
+        maps_to_callers = store.query(
+            "MATCH (caller:Method)-[r:CodeRelation {type: 'MAPS_TO'}]->(target:Method) "
+            "WHERE target.name = $method AND target.className = $cls "
+            "RETURN caller.name AS caller, caller.className AS callerClass, r.confidence AS confidence",
+            {"method": actual_name, "cls": actual_class},
+        )
+        for c in (maps_to_callers or []):
+            key = f"{c['callerClass']}.{c['caller']}" if c.get('callerClass') else c['caller']
+            if key not in page_map:
+                page_map[key] = {
+                    "caller": c["caller"],
+                    "callerClass": c.get("callerClass", ""),
+                    "confidence": c.get("confidence"),
+                    "relType": "MAPS_TO (MyBatis)",
+                    "children": [],
+                }
+
+        callers_flat = list(page_map.values())
+
+        # Callees: methods this method calls (with depth-2 expansion, same as api_mindmap)
+        callees = store.query(
+            "MATCH (source:Method)-[r:CodeRelation {type: 'CALLS'}]->(callee:Method) "
+            "WHERE source.name = $method AND source.className = $cls "
+            "RETURN callee.name AS callee, callee.className AS calleeClass, r.confidence AS confidence",
+            {"method": actual_name, "cls": actual_class},
+        )
+
+        # If target is an Impl, also find callees from the Interface definition
+        iface_callees = []
+        if impl_iface_short:
+            iface_callees = store.query(
+                "MATCH (source:Method)-[r:CodeRelation {type: 'CALLS'}]->(callee:Method) "
+                "WHERE source.name = $method AND source.className = $iface "
+                "RETURN callee.name AS callee, callee.className AS calleeClass, r.confidence AS confidence",
+                {"method": actual_name, "iface": impl_iface_short},
+            )
+
+        # Build callee tree with depth-2 expansion
+        callee_map: dict[str, dict] = []
+        seen_callees: set[str] = set()
+        for c in (callees or []):
+            key = f"{c['calleeClass']}.{c['callee']}"
+            if key not in seen_callees:
+                seen_callees.add(key)
+                callee_map.append({"name": key, "via": "CALLS", "confidence": c.get("confidence"), "children": []})
+        for c in (iface_callees or []):
+            key = f"{c['calleeClass']}.{c['callee']}"
+            if key not in seen_callees:
+                seen_callees.add(key)
+                callee_map.append({"name": key, "via": "CALLS", "confidence": c.get("confidence"), "children": []})
+
+        # Depth-2 expansion: batch query all children of callees
+        if callee_map:
+            callee_keys = [c["name"] for c in callee_map]
+            conditions = " OR ".join(
+                f"(source.className = {json.dumps(k.rsplit('.', 1)[0])} AND source.name = {json.dumps(k.rsplit('.', 1)[1])})"
+                for k in callee_keys
+            )
+            depth2_rows = store.query(
+                f"MATCH (source:Method)-[r:CodeRelation {{type: 'CALLS'}}]->(child:Method) "
+                f"WHERE {conditions} "
+                f"RETURN source.className AS srcClass, source.name AS srcName, "
+                f"       child.name AS childName, child.className AS childClass LIMIT 200"
+            )
+            callee_lookup = {c["name"]: c for c in callee_map}
+            for r in depth2_rows:
+                parent_key = f"{r['srcClass']}.{r['srcName']}"
+                child_key = f"{r['childClass']}.{r['childName']}"
+                if parent_key in callee_lookup:
+                    if not any(ch["name"] == child_key for ch in callee_lookup[parent_key]["children"]):
+                        callee_lookup[parent_key]["children"].append({
+                            "name": child_key,
+                            "via": "CALLS",
+                            "children": [],
+                        })
+
+        # Depth-2: expand Mapper → Table by inference (MyBatis mappers have no outgoing CALLS edges)
+        for node in callee_map:
+            if "Mapper" in node["name"] or "DAO" in node["name"]:
+                parts = node["name"].rsplit(".", 1)
+                if len(parts) == 2:
+                    table_name = _infer_table_from_mapper(parts[0], parts[1])
+                    if table_name:
+                        if not any(ch["name"] == table_name for ch in node["children"]):
+                            node["children"].append({
+                                "name": table_name,
+                                "via": "SQL (MyBatis)",
+                                "children": [],
+                            })
+
+        # Imports
+        imports = store.query(
+            "MATCH (n)-[r:CodeRelation {type: 'IMPORTS'}]->(dep) "
+            "WHERE n.name = $name AND n.className = $cls "
+            "RETURN dep.name AS import, r.confidence AS confidence",
+            {"name": actual_name, "cls": actual_class},
+        )
+        imports_flat = [{"import": i["import"], "confidence": i.get("confidence")} for i in (imports or [])]
+
+        # Accesses (for Field nodes)
+        accesses = store.query(
+            "MATCH (accessor)-[r:CodeRelation {type: 'ACCESSES'}]->(target) "
+            "WHERE target.name = $name AND target.className = $cls "
+            "RETURN accessor.name AS accessor, accessor.className AS accessorClass, r.confidence AS confidence",
+            {"name": method_name, "cls": actual_class},
+        )
+        accesses_flat = [{"accessor": a["accessor"], "accessorClass": a.get("accessorClass", ""), "confidence": a.get("confidence")} for a in (accesses or [])]
+
+        ctx = {
+            "callers": callers_flat,
+            "callees": callee_map,
+            "imports": imports_flat,
+            "accesses": accesses_flat,
+        }
         return _ok(ctx)
     except Exception as e:
         return _err(str(e))
@@ -1106,15 +1994,32 @@ async def api_db_tables(request: Request) -> JSONResponse:
 
 
 async def api_groups(request: Request) -> JSONResponse:
-    """List all repo groups."""
-    from ..storage.repo_manager import list_groups
+    """List all repo groups — reads from new group storage (group.yaml)."""
+    from ..core.group.storage import get_group_dir, list_groups as list_group_dirs
+    from ..core.group.config_parser import parse_group_yaml
+    from ..storage.repo_manager import get_repo
 
-    groups = list_groups()
-    return _ok([{
-        "name": g.name,
-        "label": g.label,
-        "repos": [{"name": r.name, "path": r.path, "role": r.role} for r in g.repos],
-    } for g in groups])
+    group_names = list_group_dirs()
+    result = []
+    for gname in group_names:
+        group_dir = get_group_dir(gname)
+        try:
+            config = parse_group_yaml(os.path.join(group_dir, "group.yaml"))
+        except Exception:
+            continue
+        repos = []
+        for role, reg_name in config.repos.items():
+            repo = get_repo(reg_name)
+            if repo:
+                repos.append({"name": reg_name, "path": repo.path, "role": role})
+            else:
+                repos.append({"name": reg_name, "path": "", "role": role})
+        result.append({
+            "name": config.name,
+            "label": config.description or config.name,
+            "repos": repos,
+        })
+    return _ok(result)
 
 
 async def api_groups_create(request: Request) -> JSONResponse:
@@ -1234,14 +2139,25 @@ async def api_impact(request: Request) -> JSONResponse:
 
 
 async def api_mindmap(request: Request) -> JSONResponse:
-    """Return call chain tree for mindmap visualization."""
+    """Return call chain tree for mindmap visualization.
+
+    Supports both single-repo and group mode. In group mode,
+    also queries the frontend repo for USES_ENDPOINT connections.
+    """
     target = request.query_params.get("target", "")
     if not target:
         return _err("Missing 'target' parameter")
+    group_param = request.query_params.get("group", "")
     repo = _get_repo_param(request)
-    store, _ = _load_store(repo)
+    store, repo_root = _load_store(repo)
     if store is None:
         return _err("No indexed repository found")
+    # Auto-detect group if not explicitly provided
+    # Use resolved repo_root for group detection (handles short names like "newbee-mall")
+    if not group_param:
+        auto_group = _auto_detect_group(str(repo_root) if repo_root else (repo or ""))
+        if auto_group:
+            group_param = auto_group.name
     try:
         # Parse "ClassName.methodName" format
         class_filter = request.query_params.get("class", "")
@@ -1293,7 +2209,7 @@ async def api_mindmap(request: Request) -> JSONResponse:
         root_label = f"{class_name}.{method_name}"
 
         # Upstream: USES_ENDPOINT pages as top-level, Controller as child
-        # Actual flow: HTML page → USES_ENDPOINT → Controller → CALLS → target
+        # New flow: HTML page → USES_ENDPOINT → API ← EXPOSES ← Controller → CALLS → target
         upstream = []
         if impl_iface_short:
             callers = store.query(
@@ -1302,41 +2218,212 @@ async def api_mindmap(request: Request) -> JSONResponse:
                 "RETURN caller.name AS callerName, caller.className AS callerClass LIMIT 20",
                 {"iface": impl_iface_short, "method": method_name},
             )
-            # Two-hop: HTML pages → USES_ENDPOINT → Controller → CALLS → Interface
+            # Three-hop: HTML pages → USES_ENDPOINT → API ← EXPOSES ← Controller → CALLS → Interface
             ep_callers = store.query(
-                "MATCH (page:Method)-[r1:CodeRelation {type: 'USES_ENDPOINT'}]->(ctrl:Method)-[r2:CodeRelation {type: 'CALLS'}]->(iface:Method) "
+                "MATCH (page:Method)-[r1:CodeRelation {type: 'USES_ENDPOINT'}]->(api:API) "
+                "<-[r2:CodeRelation {type: 'EXPOSES'}]-(ctrl:Method)-[r3:CodeRelation {type: 'CALLS'}]->(iface:Method) "
                 "WHERE iface.className = $iface AND iface.name = $method "
                 "RETURN page.name AS pageName, page.className AS pageClass, "
-                "       ctrl.name AS ctrlName, ctrl.className AS ctrlClass LIMIT 20",
+                "       ctrl.name AS ctrlName, ctrl.className AS ctrlClass, "
+                "       api.httpMethod AS httpMethod, api.httpPath AS httpPath LIMIT 20",
                 {"iface": impl_iface_short, "method": method_name},
             )
 
-            # Build tree: USES_ENDPOINT pages as parents, Controller as child
-            page_map: dict[str, dict] = {}
+            # Also query frontend repo for CALLS connections (group mode)
+            if group_param:
+                group = _get_group_info(group_param)
+                if group:
+                    for fe_repo in group.repos:
+                        if fe_repo.role == "frontend":
+                            fe_db = Path(fe_repo.path) / ".pygitnexus" / "kuzu"
+                            if fe_db.exists():
+                                try:
+                                    fe_store = GraphStore(fe_db)
+                                    # Get all API nodes exposed by Controllers that call the Interface
+                                    api_rows = store.query(
+                                        "MATCH (ctrl:Method)-[r1:CodeRelation {type: 'EXPOSES'}]->(api:API), "
+                                        "(ctrl:Method)-[r2:CodeRelation {type: 'CALLS'}]->(iface:Method) "
+                                        "WHERE iface.className = $iface AND iface.name = $method "
+                                        "RETURN api AS apiNode, ctrl.className AS ctrlClass, ctrl.name AS ctrlName LIMIT 20",
+                                        {"iface": impl_iface_short, "method": method_name},
+                                    )
+                                    for api_row in api_rows:
+                                        api_node = api_row.get("apiNode", {})
+                                        hm = api_node.get("httpMethod", "") if isinstance(api_node, dict) else ""
+                                        hp = api_node.get("httpPath", "") if isinstance(api_node, dict) else ""
+                                        ctrl_cls = api_row.get("ctrlClass", "")
+                                        ctrl_name = api_row.get("ctrlName", "")
+                                        if hm and hp:
+                                            # Query frontend CALLS with fuzzy path matching
+                                            fe_matches = _query_frontend_pages(fe_store, hm, hp)
+                                            for fm in fe_matches:
+                                                ep_callers.append({
+                                                    "pageName": fm["pageName"],
+                                                    "pageClass": "",
+                                                    "ctrlName": ctrl_name,
+                                                    "ctrlClass": ctrl_cls,
+                                                    "httpMethod": fm["httpMethod"],
+                                                    "httpPath": fm["httpPath"],
+                                                    "feMethod": fm.get("feMethod", ""),
+                                                })
+                                    fe_store.close()
+                                except Exception:
+                                    pass
+
+            # Build tree: controller → API → function → page (inverted for ECharts BT rendering)
+            ctrl_map: dict[str, dict] = {}
             for c in ep_callers:
                 pk = c["pageName"]
                 ctrl_key = f"{c['ctrlClass']}.{c['ctrlName']}"
-                if pk not in page_map:
-                    page_map[pk] = {"name": pk, "via": "USES_ENDPOINT", "children": []}
-                if not any(ch["name"] == ctrl_key for ch in page_map[pk]["children"]):
-                    page_map[pk]["children"].append({
-                        "name": ctrl_key,
-                        "via": "CALLS (via Interface)",
+                api_label = f"{c.get('httpMethod', '?')} {c.get('httpPath', '?')}"
+                fe_method = c.get("feMethod", "")
+                if ctrl_key not in ctrl_map:
+                    ctrl_map[ctrl_key] = {"name": ctrl_key, "via": "CALLS", "children": []}
+                ctrl_children = ctrl_map[ctrl_key]["children"]
+
+                # Find or create API node under controller
+                api_node = None
+                for child in ctrl_children:
+                    if child.get("is_api") and child["name"] == api_label:
+                        api_node = child
+                        break
+                if api_node is None:
+                    api_node = {
+                        "name": api_label,
+                        "via": "EXPOSES",
+                        "is_api": True,
                         "children": [],
-                    })
+                    }
+                    ctrl_children.append(api_node)
+
+                # Add function between API and page, then page as leaf
+                if fe_method and fe_method != pk:
+                    func_node = None
+                    for child in api_node["children"]:
+                        if child["name"] == fe_method:
+                            func_node = child
+                            break
+                    if func_node is None:
+                        func_node = {
+                            "name": fe_method,
+                            "via": "CALLS",
+                            "children": [],
+                        }
+                        api_node["children"].append(func_node)
+                    # page as innermost leaf
+                    if not any(gc["name"] == pk for gc in func_node.get("children", [])):
+                        func_node["children"].append({
+                            "name": pk,
+                            "via": "USES_ENDPOINT",
+                            "children": [],
+                        })
+                else:
+                    # No function name, add page directly under API
+                    if not any(gc["name"] == pk for gc in api_node["children"]):
+                        api_node["children"].append({
+                            "name": pk,
+                            "via": "USES_ENDPOINT",
+                            "children": [],
+                        })
 
             # Add pure Java CALLS callers not covered by USES_ENDPOINT
+            def _find_in_tree(name: str, items: list) -> bool:
+                """Recursively check if a name exists anywhere in the tree."""
+                for item in items:
+                    if item.get("name") == name:
+                        return True
+                    if item.get("children") and _find_in_tree(name, item["children"]):
+                        return False
+                return False
+
             for c in callers:
                 key = f"{c['callerClass']}.{c['callerName']}"
-                if key not in page_map:
-                    already_child = any(
-                        any(ch["name"] == key for ch in pm["children"])
-                        for pm in page_map.values()
-                    )
-                    if not already_child:
-                        page_map[key] = {"name": key, "via": "CALLS (via Interface)", "children": []}
+                if key not in ctrl_map and not _find_in_tree(key, list(ctrl_map.values())):
+                    ctrl_map[key] = {"name": key, "via": "CALLS (via Interface)", "children": []}
 
-            upstream = list(page_map.values())
+            upstream = list(ctrl_map.values())
+
+            # MAPS_TO callers: MyBatis Mapper methods that map to this method
+            # Expand upstream: Mapper → ServiceImpl → Controller → Page
+            mybatis_callers = store.query(
+                "MATCH (caller:Method)-[r:CodeRelation {type: 'MAPS_TO'}]->(target:Method) "
+                "WHERE target.className = $cls AND target.name = $method "
+                "RETURN caller.name AS callerName, caller.className AS callerClass LIMIT 20",
+                {"cls": class_name, "method": method_name},
+            )
+            for c in mybatis_callers:
+                mapper_key = f"{c['callerClass']}.{c['callerName']}"
+                if mapper_key not in ctrl_map:
+                    mapper_node = {"name": mapper_key, "via": "MAPS_TO (MyBatis)", "children": []}
+
+                    # Find CALLS callers of this Mapper method (ServiceImpl)
+                    service_callers = store.query(
+                        "MATCH (caller:Method)-[r:CodeRelation {type: 'CALLS'}]->(target:Method) "
+                        "WHERE target.name = $methodName AND target.className = $mapperClass "
+                        "RETURN caller.name AS callerName, caller.className AS callerClass LIMIT 10",
+                        {"methodName": c['callerName'], "mapperClass": c['callerClass']},
+                    )
+                    seen_services: set[str] = set()
+                    for sc in service_callers:
+                        svc_key = f"{sc['callerClass']}.{sc['callerName']}"
+                        if svc_key not in seen_services:
+                            seen_services.add(svc_key)
+                            svc_node = {"name": svc_key, "via": "CALLS", "children": []}
+
+                            # If ServiceImpl implements an Interface, query callers of the Interface method
+                            iface_name = None
+                            impl_rows = store.query(
+                                "MATCH (c:Class)-[r:CodeRelation {type: 'IMPLEMENTS'}]->(i:Interface) "
+                                "WHERE c.name CONTAINS $impl RETURN i.name AS ifaceName LIMIT 1",
+                                {"impl": sc['callerClass']},
+                            )
+                            if impl_rows:
+                                iface_name = impl_rows[0]["ifaceName"]
+
+                            target_class = iface_name if iface_name else sc['callerClass']
+                            target_simple = target_class.rsplit(".", 1)[-1] if "." in target_class else target_class
+
+                            # Find CALLS callers of this Service/Interface method (Controller)
+                            ctrl_callers = store.query(
+                                "MATCH (caller:Method)-[r:CodeRelation {type: 'CALLS'}]->(target:Method) "
+                                "WHERE target.name = $methodName AND target.className = $svcClass "
+                                "RETURN caller.name AS callerName, caller.className AS callerClass LIMIT 10",
+                                {"methodName": sc['callerName'], "svcClass": target_simple},
+                            )
+                            seen_ctrls: set[str] = set()
+                            for cc in ctrl_callers:
+                                ctrl_key = f"{cc['callerClass']}.{cc['callerName']}"
+                                if ctrl_key not in seen_ctrls:
+                                    seen_ctrls.add(ctrl_key)
+                                    ctrl_node = {"name": ctrl_key, "via": "CALLS", "children": []}
+
+                                    # Find USES_ENDPOINT pages that call this Controller
+                                    page_callers = store.query(
+                                        "MATCH (page:Method)-[r1:CodeRelation {type: 'USES_ENDPOINT'}]->(api:API) "
+                                        "<-[r2:CodeRelation {type: 'EXPOSES'}]-(ctrl:Method) "
+                                        "WHERE ctrl.name = $methodName AND ctrl.className = $ctrlClass "
+                                        "RETURN page.name AS pageName, "
+                                        "       api.httpMethod AS httpMethod, api.httpPath AS httpPath LIMIT 10",
+                                        {"methodName": cc['callerName'], "ctrlClass": cc['callerClass']},
+                                    )
+                                    for pc in page_callers:
+                                        api_label = f"{pc.get('httpMethod', '?')} {pc.get('httpPath', '?')}"
+                                        api_node = {"name": api_label, "via": "EXPOSES", "is_api": True, "children": [
+                                            {"name": pc["pageName"], "via": "USES_ENDPOINT", "children": []}
+                                        ]}
+                                        if not any(ch["name"] == api_label for ch in ctrl_node["children"]):
+                                            ctrl_node["children"].append(api_node)
+
+                                    svc_node["children"].append(ctrl_node)
+
+                            if not svc_node["children"]:
+                                svc_node["children"] = [{"name": "(no callers found)", "via": "", "children": []}]
+                            mapper_node["children"].append(svc_node)
+
+                    if not mapper_node["children"]:
+                        mapper_node["children"] = [{"name": "(no callers found)", "via": "", "children": []}]
+                    ctrl_map[mapper_key] = mapper_node
+                    upstream.append(mapper_node)
         else:
             # Direct callers (for Controllers, Services without Interface)
             callers = store.query(
@@ -1345,56 +2432,269 @@ async def api_mindmap(request: Request) -> JSONResponse:
                 "RETURN caller.name AS callerName, caller.className AS callerClass LIMIT 20",
                 {"cls": class_name, "method": method_name},
             )
-            # Also include frontend pages via USES_ENDPOINT
+            # Frontend pages via USES_ENDPOINT → API → EXPOSES → target
             ep_callers = store.query(
-                "MATCH (caller:Method)-[r:CodeRelation {type: 'USES_ENDPOINT'}]->(target:Method) "
+                "MATCH (caller:Method)-[r1:CodeRelation {type: 'USES_ENDPOINT'}]->(api:API) "
+                "<-[r2:CodeRelation {type: 'EXPOSES'}]-(target:Method) "
+                "WHERE target.className = $cls AND target.name = $method "
+                "RETURN caller.name AS callerName, caller.className AS callerClass, "
+                "       caller.filePath AS callerFile, "
+                "       api.httpMethod AS httpMethod, api.httpPath AS httpPath LIMIT 20",
+                {"cls": class_name, "method": method_name},
+            )
+
+            # For Service/Impl targets without Interface: try three-hop to find page→API→Controller→target
+            two_hop = store.query(
+                "MATCH (page:Method)-[r1:CodeRelation {type: 'USES_ENDPOINT'}]->(api:API) "
+                "<-[r2:CodeRelation {type: 'EXPOSES'}]-(ctrl:Method)-[r3:CodeRelation {type: 'CALLS'}]->(target:Method) "
+                "WHERE target.className = $cls AND target.name = $method "
+                "RETURN page.name AS pageName, page.className AS pageClass, "
+                "       page.filePath AS pageFile, "
+                "       ctrl.name AS ctrlName, ctrl.className AS ctrlClass, "
+                "       api.httpMethod AS httpMethod, api.httpPath AS httpPath LIMIT 20",
+                {"cls": class_name, "method": method_name},
+            )
+
+            # Also query frontend repo for CALLS connections (group mode)
+            if group_param:
+                group = _get_group_info(group_param)
+                if group:
+                    for fe_repo in group.repos:
+                        if fe_repo.role == "frontend":
+                            fe_db = Path(fe_repo.path) / ".pygitnexus" / "kuzu"
+                            if fe_db.exists():
+                                try:
+                                    fe_store = GraphStore(fe_db)
+                                    # Get all API nodes that expose the target method
+                                    api_rows = store.query(
+                                        "MATCH (ctrl:Method)-[r:CodeRelation {type: 'EXPOSES'}]->(api:API) "
+                                        "WHERE ctrl.className = $cls AND ctrl.name = $method "
+                                        "RETURN api AS apiNode LIMIT 20",
+                                        {"cls": class_name, "method": method_name},
+                                    )
+                                    for api_row in api_rows:
+                                        api_node = api_row.get("apiNode", {})
+                                        hm = api_node.get("httpMethod", "") if isinstance(api_node, dict) else ""
+                                        hp = api_node.get("httpPath", "") if isinstance(api_node, dict) else ""
+                                        if hm and hp:
+                                            # Query frontend CALLS with fuzzy path matching
+                                            fe_matches = _query_frontend_pages(fe_store, hm, hp)
+                                            for fm in fe_matches:
+                                                two_hop.append({
+                                                    "pageName": fm["pageName"],
+                                                    "pageClass": "",
+                                                    "ctrlName": method_name,
+                                                    "ctrlClass": class_name,
+                                                    "httpMethod": fm["httpMethod"],
+                                                    "httpPath": fm["httpPath"],
+                                                    "feMethod": fm.get("feMethod", ""),
+                                                })
+                                    fe_store.close()
+                                except Exception:
+                                    pass
+
+            ctrl_map: dict[str, dict] = {}
+            # Build tree from two-hop USES_ENDPOINT: controller → API → function → page (inverted for ECharts BT)
+            for c in two_hop:
+                # Use file path to get display page name (e.g., "Login.vue")
+                page_file = c.get("pageFile", "")
+                pk = Path(page_file).name if page_file else c["pageName"]
+                fe_method = c["pageName"]  # original function name from page
+                ctrl_key = f"{c['ctrlClass']}.{c['ctrlName']}"
+                api_label = f"{c.get('httpMethod', '?')} {c.get('httpPath', '?')}"
+                if ctrl_key not in ctrl_map:
+                    ctrl_map[ctrl_key] = {"name": ctrl_key, "via": "CALLS", "children": []}
+                ctrl_children = ctrl_map[ctrl_key]["children"]
+
+                # Find or create API node under controller
+                api_node = None
+                for child in ctrl_children:
+                    if child.get("is_api") and child["name"] == api_label:
+                        api_node = child
+                        break
+                if api_node is None:
+                    api_node = {
+                        "name": api_label,
+                        "via": "EXPOSES",
+                        "is_api": True,
+                        "children": [],
+                    }
+                    ctrl_children.append(api_node)
+
+                # Add function between API and page, page as innermost leaf
+                if fe_method and fe_method != pk:
+                    func_node = None
+                    for child in api_node["children"]:
+                        if child["name"] == fe_method:
+                            func_node = child
+                            break
+                    if func_node is None:
+                        func_node = {
+                            "name": fe_method,
+                            "via": "CALLS",
+                            "children": [],
+                        }
+                        api_node["children"].append(func_node)
+                    if not any(gc["name"] == pk for gc in func_node.get("children", [])):
+                        func_node["children"].append({
+                            "name": pk,
+                            "via": "USES_ENDPOINT",
+                            "children": [],
+                        })
+                else:
+                    if not any(gc["name"] == pk for gc in api_node["children"]):
+                        api_node["children"].append({
+                            "name": pk,
+                            "via": "USES_ENDPOINT",
+                            "children": [],
+                        })
+
+            # Add flat USES_ENDPOINT callers with controller → API → function → page structure
+            for c in ep_callers:
+                caller_file = c.get("callerFile", "")
+                pk = Path(caller_file).name if caller_file else c["callerName"]
+                fe_method = c["callerName"]
+                api_label = f"{c.get('httpMethod', '?')} {c.get('httpPath', '?')}"
+                # ep_callers are for direct Controller targets, so the target itself is the Controller
+                ctrl_key = f"{class_name}.{method_name}"
+                if ctrl_key not in ctrl_map:
+                    ctrl_map[ctrl_key] = {"name": ctrl_key, "via": "EXPOSES", "children": []}
+                ctrl_children = ctrl_map[ctrl_key]["children"]
+
+                # Find or create API node under controller
+                api_node = None
+                for child in ctrl_children:
+                    if child.get("is_api") and child["name"] == api_label:
+                        api_node = child
+                        break
+                if api_node is None:
+                    api_node = {
+                        "name": api_label,
+                        "via": "EXPOSES",
+                        "is_api": True,
+                        "children": [],
+                    }
+                    ctrl_children.append(api_node)
+
+                # Add function under API, page as leaf
+                if fe_method and fe_method != pk:
+                    if not any(gc["name"] == fe_method for gc in api_node["children"]):
+                        api_node["children"].append({
+                            "name": fe_method,
+                            "via": "CALLS",
+                            "children": [{"name": pk, "via": "USES_ENDPOINT", "children": []}],
+                        })
+                    else:
+                        # Add page under existing function
+                        for gc in api_node["children"]:
+                            if gc["name"] == fe_method:
+                                if not any(gc2["name"] == pk for gc2 in gc.get("children", [])):
+                                    gc.setdefault("children", []).append({"name": pk, "via": "USES_ENDPOINT", "children": []})
+                                break
+                else:
+                    if not any(gc["name"] == pk for gc in api_node["children"]):
+                        api_node["children"].append({
+                            "name": pk,
+                            "via": "USES_ENDPOINT",
+                            "children": [],
+                        })
+
+            # Add pure Java CALLS callers (check nested to avoid duplicates)
+            def _find_in_tree2(name: str, items: list) -> bool:
+                for item in items:
+                    if item.get("name") == name:
+                        return True
+                    if item.get("children") and _find_in_tree2(name, item["children"]):
+                        return True
+                return False
+
+            for c in callers:
+                key = f"{c['callerClass']}.{c['callerName']}"
+                if key not in ctrl_map and not _find_in_tree2(key, list(ctrl_map.values())):
+                    ctrl_map[key] = {"name": key, "via": "CALLS", "children": []}
+
+            # MAPS_TO callers: MyBatis Mapper methods that map to this method
+            # Expand upstream: Mapper → ServiceImpl → Controller → Page
+            mybatis_callers = store.query(
+                "MATCH (caller:Method)-[r:CodeRelation {type: 'MAPS_TO'}]->(target:Method) "
                 "WHERE target.className = $cls AND target.name = $method "
                 "RETURN caller.name AS callerName, caller.className AS callerClass LIMIT 20",
                 {"cls": class_name, "method": method_name},
             )
+            for c in mybatis_callers:
+                mapper_key = f"{c['callerClass']}.{c['callerName']}"
+                if mapper_key not in ctrl_map:
+                    mapper_node = {"name": mapper_key, "via": "MAPS_TO (MyBatis)", "children": []}
 
-            # For Controller targets: USES_ENDPOINT pages are the callers (direct)
-            # For Service/Impl targets without Interface: try two-hop to find page→Controller→target
-            two_hop = store.query(
-                "MATCH (page:Method)-[r1:CodeRelation {type: 'USES_ENDPOINT'}]->(ctrl:Method)-[r2:CodeRelation {type: 'CALLS'}]->(target:Method) "
-                "WHERE target.className = $cls AND target.name = $method "
-                "RETURN page.name AS pageName, page.className AS pageClass, "
-                "       ctrl.name AS ctrlName, ctrl.className AS ctrlClass LIMIT 20",
-                {"cls": class_name, "method": method_name},
-            )
-
-            page_map: dict[str, dict] = {}
-            # Build tree from two-hop USES_ENDPOINT: page → Controller → target
-            for c in two_hop:
-                pk = c["pageName"]
-                ctrl_key = f"{c['ctrlClass']}.{c['ctrlName']}"
-                if pk not in page_map:
-                    page_map[pk] = {"name": pk, "via": "USES_ENDPOINT", "children": []}
-                if not any(ch["name"] == ctrl_key for ch in page_map[pk]["children"]):
-                    page_map[pk]["children"].append({
-                        "name": ctrl_key,
-                        "via": "CALLS",
-                        "children": [],
-                    })
-
-            # Add flat USES_ENDPOINT callers (if any page directly calls this method)
-            for c in ep_callers:
-                pk = c["callerName"]
-                if pk not in page_map:
-                    page_map[pk] = {"name": pk, "via": "USES_ENDPOINT", "children": []}
-
-            # Add pure Java CALLS callers
-            for c in callers:
-                key = f"{c['callerClass']}.{c['callerName']}"
-                if key not in page_map:
-                    already_child = any(
-                        any(ch["name"] == key for ch in pm["children"])
-                        for pm in page_map.values()
+                    # Find CALLS callers of this Mapper method (ServiceImpl)
+                    service_callers = store.query(
+                        "MATCH (caller:Method)-[r:CodeRelation {type: 'CALLS'}]->(target:Method) "
+                        "WHERE target.name = $methodName AND target.className = $mapperClass "
+                        "RETURN caller.name AS callerName, caller.className AS callerClass LIMIT 10",
+                        {"methodName": c['callerName'], "mapperClass": c['callerClass']},
                     )
-                    if not already_child:
-                        page_map[key] = {"name": key, "via": "CALLS", "children": []}
+                    seen_services: set[str] = set()
+                    for sc in service_callers:
+                        svc_key = f"{sc['callerClass']}.{sc['callerName']}"
+                        if svc_key not in seen_services:
+                            seen_services.add(svc_key)
+                            svc_node = {"name": svc_key, "via": "CALLS", "children": []}
 
-            upstream = list(page_map.values())
+                            # If ServiceImpl implements an Interface, query callers of the Interface method
+                            iface_name = None
+                            impl_rows = store.query(
+                                "MATCH (c:Class)-[r:CodeRelation {type: 'IMPLEMENTS'}]->(i:Interface) "
+                                "WHERE c.name CONTAINS $impl RETURN i.name AS ifaceName LIMIT 1",
+                                {"impl": sc['callerClass']},
+                            )
+                            if impl_rows:
+                                iface_name = impl_rows[0]["ifaceName"]
+
+                            target_class = iface_name if iface_name else sc['callerClass']
+                            target_simple = target_class.rsplit(".", 1)[-1] if "." in target_class else target_class
+
+                            # Find CALLS callers of this Service/Interface method (Controller)
+                            ctrl_callers = store.query(
+                                "MATCH (caller:Method)-[r:CodeRelation {type: 'CALLS'}]->(target:Method) "
+                                "WHERE target.name = $methodName AND target.className = $svcClass "
+                                "RETURN caller.name AS callerName, caller.className AS callerClass LIMIT 10",
+                                {"methodName": sc['callerName'], "svcClass": target_simple},
+                            )
+                            seen_ctrls: set[str] = set()
+                            for cc in ctrl_callers:
+                                ctrl_key = f"{cc['callerClass']}.{cc['callerName']}"
+                                if ctrl_key not in seen_ctrls:
+                                    seen_ctrls.add(ctrl_key)
+                                    ctrl_node = {"name": ctrl_key, "via": "CALLS", "children": []}
+
+                                    # Find USES_ENDPOINT pages that call this Controller
+                                    page_callers = store.query(
+                                        "MATCH (page:Method)-[r1:CodeRelation {type: 'USES_ENDPOINT'}]->(api:API) "
+                                        "<-[r2:CodeRelation {type: 'EXPOSES'}]-(ctrl:Method) "
+                                        "WHERE ctrl.name = $methodName AND ctrl.className = $ctrlClass "
+                                        "RETURN page.name AS pageName, "
+                                        "       api.httpMethod AS httpMethod, api.httpPath AS httpPath LIMIT 10",
+                                        {"methodName": cc['callerName'], "ctrlClass": cc['callerClass']},
+                                    )
+                                    for pc in page_callers:
+                                        api_label = f"{pc.get('httpMethod', '?')} {pc.get('httpPath', '?')}"
+                                        api_node = {"name": api_label, "via": "EXPOSES", "is_api": True, "children": [
+                                            {"name": pc["pageName"], "via": "USES_ENDPOINT", "children": []}
+                                        ]}
+                                        if not any(ch["name"] == api_label for ch in ctrl_node["children"]):
+                                            ctrl_node["children"].append(api_node)
+
+                                    svc_node["children"].append(ctrl_node)
+
+                            if not svc_node["children"]:
+                                svc_node["children"] = [{"name": "(no callers found)", "via": "", "children": []}]
+                            mapper_node["children"].append(svc_node)
+
+                    if not mapper_node["children"]:
+                        mapper_node["children"] = [{"name": "(no callers found)", "via": "", "children": []}]
+                    ctrl_map[mapper_key] = mapper_node
+
+            upstream = list(ctrl_map.values())
 
         # Downstream: build nested tree with depth-2 expansion
         callees = store.query(

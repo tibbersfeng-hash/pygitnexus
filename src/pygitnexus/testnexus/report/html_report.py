@@ -395,12 +395,6 @@ class HTMLReportGenerator:
             coverage_file = Path(db_path).parent / "tests" / "journeys" / "coverage.json"
             if coverage_file.is_file():
                 return json.loads(coverage_file.read_text())
-        # Fallback: try common locations
-        for candidate in [
-            Path("/tmp/test-projects/newbee-mall-vue3-app/.testnexus/tests/journeys/coverage.json"),
-        ]:
-            if candidate.is_file():
-                return json.loads(candidate.read_text())
         return None
 
     def _get_baselines(self) -> list[dict]:

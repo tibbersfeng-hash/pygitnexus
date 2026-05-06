@@ -119,6 +119,155 @@ analyze(repo_path)
 | API 调用 | >=15 | 26 |
 | 图谱节点 | >50 | 78 |
 
+## 调用链验证
+
+### 验证脚本
+
+`tests/verify_callchain.py` — 基于 tree-sitter AST 的调用链验证工具。
+
+**原理**: 用 tree-sitter 独立解析每个 Java 文件的方法体，提取所有 `method_invocation` 节点作为地面实况（Ground Truth），与 KuzuDB 中 PyGitNexus 的 CALLS 关系对比。
+
+**用法**:
+```bash
+cd /home/claude/.cc-connect/workspace/pygitnexus
+uv run python tests/verify_callchain.py /path/to/java/project [output_dir]
+```
+
+**输出**:
+- `verification_summary.txt` — 指标报告（Precision / Recall / F1）
+- `false_positives.tsv` — PyGitNexus 报告但 AST 中不存在的调用
+- `false_negatives.tsv` — AST 中存在但 PyGitNexus 未找到的调用
+
+**当前指标（newbee-mall, 88 Java 文件）**:
+
+| 指标 | 值 |
+|------|-----|
+| Precision | 73.73% |
+| Recall | 82.71% |
+| F1 Score | 77.96% |
+| 假阳性数 | 162 |
+| 假阴性数 | 115 |
+
+### 验证层级
+
+1. **AST 提取** — tree-sitter 解析方法体，提取 `method_invocation` 节点
+2. **方法级对比** — 对比 (caller_method → target_method) 对
+3. **JDK 过滤** — 自动过滤 JDK/标准库方法（Servlet、反射、IO 等）
+4. **模式分类** — 假阳性按模式分组（getter/setter/cross-file 等）
+
+### 与 GitNexus 交叉对比
+
+`tests/compare_calls.py` — PyGitNexus vs GitNexus 调用链对比工具。
+主要用于检测两个工具共有的系统性问题。
+
+**最新对比结果（shenyu, 3176 Java 文件）**:
+- PyGitNexus 假阳性率: 0.5% vs GitNexus: 2.0%
+- 双方共有: 17,095 条有效调用
+- PyGitNexus 覆盖率: 106.4%
+
+## Call Chain Mindmap 规范
+
+### 核心概念
+
+**思维导图 = 以目标方法为中心的完整调用链树**，上游（调用者）和下游（被调用）必须展示在**同一棵树**中，目标方法在**中心**，不是两个独立树。
+
+**数据流向**: 目标方法 = root，upstream = 调用方（左/上），downstream = 被调用方（右/下）。所有节点通过 `children` 连接。
+
+### API: `GET /api/mindmap`
+
+**参数**: `target`（必填，方法名）、`class`（可选，类名）、`repo`（可选）、`group`（可选，自动检测）
+
+**返回格式**（固定结构，不可变）:
+```json
+{
+  "ok": true,
+  "data": {
+    "root": "ClassName.methodName",
+    "upstream": [...],
+    "downstream": [...]
+  }
+}
+```
+
+- `root`: 字符串，目标方法的 `ClassName.methodName`
+- `upstream`: 数组，每个元素代表一个**上游分支的根节点**（如 Controller、USE_ENDPOINT 页面）
+- `downstream`: 数组，每个元素代表一个**下游直接被调用方法**
+
+**节点结构**（upstream/downstream 中每个元素）:
+```json
+{
+  "name": "ClassName.methodName",
+  "via": "CALLS",
+  "is_api": false,
+  "children": [...]
+}
+```
+
+- `name`: 字符串，节点显示文本
+- `via`: 字符串，关系类型描述（"CALLS" / "USES_ENDPOINT" / "EXPOSES" / "MAPS_TO (MyBatis)" / "SQL (MyBatis)"）
+- `is_api`: 布尔值，标记 API 节点（HTTP 端点）
+- `children`: 数组，递归子节点结构
+
+### 前端渲染（dashboard.html）
+
+**可视化库**: ECharts `tree` 类型，不是 Markmap
+
+**布局策略**（关键，不可改为两个独立树）:
+- **两个 ECharts tree series 在同一 canvas 上，共享同一个 root 节点**:
+  - `upstream`: `orient: 'RL'`（右→左），root 在右，caller 向左展开，占据 `left: '10%', right: '30%'`
+  - `downstream`: `orient: 'LR'`（左→右），root 在左，callee 向右展开，占据 `left: '30%', right: '10%'`
+  - 两个 series 的 root 节点 name 完全相同，在画布中间重叠，视觉上呈现为中心辐射
+  - 如果只有上游或只有下游，单树占满 `left: '5%', right: '10%'` 或反之
+  - 如果都无，只显示 root
+
+**颜色规范**（与图例一致，不可更改）:
+- `#6366f1` 目标方法（root）
+- `#0ea5e9` 上游调用者
+- `#10b981` 下游被调用
+- `#a78bfa` SQL / 表
+- `#f59e0b` API（HTTP 端点）
+- `#d946ef` MAPS_TO（MyBatis）
+
+**交互功能**:
+- 点击非 root 节点 → `showSymbolDetail()` 跳转到该方法的详情
+- 右键节点 → 复制节点名到剪贴板
+- 全屏按钮 → overlay 全屏展示
+
+### 后端构建规则
+
+**上游构建** (`upstream` 数组):
+1. **Interface 分支**: 查找 CALLS 指向 Interface 方法的 Controller → 向上找 USES_ENDPOINT 页面
+2. **MAPS_TO 分支**: MyBatis Mapper 方法 → 向上追溯 ServiceImpl → Controller → 页面
+3. **纯 Java CALLS**: 直接 CALLS 指向 target 的方法
+4. **group 模式**: 额外查询前端 repo 的 CALLS 关系，通过模糊路径匹配连接到后端 API
+
+**下游构建** (`downstream` 数组):
+1. 查询 target 方法的直接 CALLS（最多 30 个）
+2. **2 级展开**: 批量查询所有 callee 的子调用（最多 200 个）
+3. **Mapper → Table 推断**: 名称含 "Mapper" 或 "DAO" 的节点自动添加 SQL 子节点
+
+**去重**: 所有节点通过 `name` 去重，避免环路
+
+### 关键约束（禁止违反）
+
+1. **root 必须是一个方法**，不能是 Interface/Class/API
+2. **使用两个 tree series 在同一 canvas 上**，upstream (RL) 和 downstream (LR)，root 节点 name 完全相同，在中间重叠
+3. **upstream 和 downstream 都从同一个 root 展开**，上游向左，下游向右
+4. **API 节点（is_api=true）必须出现在页面和 Controller 之间**：page → API → Controller → target
+5. **节点 name 格式必须是 `ClassName.methodName`**（SQL/Table 节点除外）
+6. **下游必须支持 2 级展开**，不是只查 1 级
+7. **group 模式自动检测**：如果 repo 属于有 frontend 角色的 group，自动查询前端调用
+8. **模糊路径匹配**：前端 `/user/login` 应匹配后端 `/login`（去掉 `/user/` 前缀）
+
+### 相关文件
+
+| 文件 | 职责 |
+|------|------|
+| `src/pygitnexus/web/server.py` | `api_mindmap` 端点 + 树构建逻辑 |
+| `src/pygitnexus/web/dashboard.html` | ECharts 渲染 + 交互 |
+
+---
+
 ## README 更新规则
 
 每次功能变更后，必须更新 `README.md` 中的对应章节，包括：

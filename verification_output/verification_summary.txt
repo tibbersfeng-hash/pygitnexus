@@ -1,0 +1,75 @@
+======================================================================
+PyGitNexus Call Chain Verification Report
+======================================================================
+
+## Metrics
+
+| Metric | Value |
+|--------|-------|
+| True Positives | 550 |
+| False Positives | 162 |
+| False Negatives | 115 |
+| Precision | 73.73% |
+| Recall | 82.71% |
+| F1 Score | 77.96% |
+| Total PyGitNexus CALLS | 746 |
+
+## False Positive Patterns
+
+| Pattern | Count |
+|---------|-------|
+| Cross-file resolved call | 69 |
+| Getter-style method | 35 |
+| Private/internal method | 29 |
+| Setter-style method | 24 |
+| Self-call (constructor/same-name) | 5 |
+
+## Top 20 False Positives (calls not in AST)
+
+| Caller | Target | Confidence |
+|--------|--------|-----------|
+| NewBeeMallCategoryServiceImpl.getCategoriesForIndex | getParentId | 0.90 |
+| NewBeeMallCategoryServiceImpl.getCategoriesForIndex | getParentId | 0.90 |
+| NewBeeMallIndexConfigServiceImpl.getConfigGoodsesForIndex | getGoodsId | 0.90 |
+| NewBeeMallOrderServiceImpl.saveOrder | getCartItemId | 0.90 |
+| DefaultStore.setState | _classPrivateFieldLooseBase$7 | 0.85 |
+| Uppy.emit | _classPrivateFieldLooseBase$6 | 0.85 |
+| Uppy.emit | emit | 0.85 |
+| Uppy.on | _classPrivateFieldLooseBase$6 | 0.85 |
+| Uppy.on | on | 0.85 |
+| Uppy.once | _classPrivateFieldLooseBase$6 | 0.85 |
+| Uppy.once | once | 0.85 |
+| Uppy.off | _classPrivateFieldLooseBase$6 | 0.85 |
+| Uppy.off | off | 0.85 |
+| Uppy.updateAll | update | 0.85 |
+| Uppy.updateAll | iteratePlugins | 0.85 |
+| Uppy.setState | setState | 0.85 |
+| Uppy.getState | getState | 0.85 |
+| Uppy.state | getState | 0.85 |
+| Uppy.setFileState | getState | 0.85 |
+| Uppy.setFileState | setState | 0.85 |
+
+## Top 20 False Negatives (missed calls)
+
+| Caller | Target | File |
+|--------|--------|------|
+| Unknown.getPayStatusEnumByStatus | getPayStatus | src/main/java/ltd/newbee/mall/common/PayStatusEnum.java |
+| BeanUtil.toMap | forBeanPropertyAccess | src/main/java/ltd/newbee/mall/util/BeanUtil.java |
+| NewBeeMallExceptionHandler.handleException | equalsIgnoreCase | src/main/java/ltd/newbee/mall/controller/common/NewBeeMallExceptionHandler.java |
+| NewBeeMallOrderServiceImpl.saveOrder | getStockNum | src/main/java/ltd/newbee/mall/service/impl/NewBeeMallOrderServiceImpl.java |
+| UploadController.uploadV2 | next | src/main/java/ltd/newbee/mall/controller/common/UploadController.java |
+| NewBeeMallCategoryServiceImpl.getCategoriesForSearch | singletonList | src/main/java/ltd/newbee/mall/service/impl/NewBeeMallCategoryServiceImpl.java |
+| AdminLoginInterceptor.preHandle | getServletPath | src/main/java/ltd/newbee/mall/interceptor/AdminLoginInterceptor.java |
+| AdminController.nameUpdate | getResult | src/main/java/ltd/newbee/mall/controller/admin/AdminController.java |
+| NewBeeMallOrderServiceImpl.updateOrderInfo | getResult | src/main/java/ltd/newbee/mall/service/impl/NewBeeMallOrderServiceImpl.java |
+| NewBeeMallOrderServiceImpl.getOrderDetailByOrderNo | getResult | src/main/java/ltd/newbee/mall/service/impl/NewBeeMallOrderServiceImpl.java |
+| NewBeeMallOrderServiceImpl.paySuccess | getResult | src/main/java/ltd/newbee/mall/service/impl/NewBeeMallOrderServiceImpl.java |
+| NewBeeMallOrderServiceImpl.finishOrder | intValue | src/main/java/ltd/newbee/mall/service/impl/NewBeeMallOrderServiceImpl.java |
+| NewBeeMallCarouselServiceImpl.saveCarousel | getResult | src/main/java/ltd/newbee/mall/service/impl/NewBeeMallCarouselServiceImpl.java |
+| NewBeeMallOrderServiceImpl.getMyOrders | groupingBy | src/main/java/ltd/newbee/mall/service/impl/NewBeeMallOrderServiceImpl.java |
+| BeanUtil.copyList | set | src/main/java/ltd/newbee/mall/util/BeanUtil.java |
+| NewBeeMallShoppingCartServiceImpl.saveNewBeeMallCartItem | getResult | src/main/java/ltd/newbee/mall/service/impl/NewBeeMallShoppingCartServiceImpl.java |
+| Unknown.getNewBeeMallOrderStatusEnumByLevel | getLevel | src/main/java/ltd/newbee/mall/common/NewBeeMallCategoryLevelEnum.java |
+| MD5Util.MD5Encode | digest | src/main/java/ltd/newbee/mall/util/MD5Util.java |
+| NewBeeMallGoodsServiceImpl.saveNewBeeMallGoods | intValue | src/main/java/ltd/newbee/mall/service/impl/NewBeeMallGoodsServiceImpl.java |
+| UploadController.uploadV2 | getOriginalFilename | src/main/java/ltd/newbee/mall/controller/common/UploadController.java |

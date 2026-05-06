@@ -22,6 +22,7 @@ LANG_EXTENSIONS = {
     ".ts": "ts", ".tsx": "ts",
     ".vue": "vue",
     ".html": "html",
+    ".xml": "xml",
 }
 
 SUPPORTED_EXTENSIONS = set(LANG_EXTENSIONS.keys())
