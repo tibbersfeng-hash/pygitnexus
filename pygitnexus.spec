@@ -8,12 +8,14 @@ Usage:
 import sys
 from pathlib import Path
 
+import tree_sitter_html
 import tree_sitter_java
 import tree_sitter_javascript
 import tree_sitter_typescript
 import kuzu
 
 # Discover native library paths
+tshtml_dir = Path(tree_sitter_html.__file__).parent
 tsjava_dir = Path(tree_sitter_java.__file__).parent
 tsjs_dir = Path(tree_sitter_javascript.__file__).parent
 tsts_dir = Path(tree_sitter_typescript.__file__).parent
@@ -51,6 +53,12 @@ hiddenimports = [
     "pygitnexus.core.scanner",
     "pygitnexus.core.models",
     "pygitnexus.core.resolver_js",
+    "pygitnexus.core.extractor_html",
+    "pygitnexus.core.extractor_vue",
+    "pygitnexus.core.operation_extractor",
+    "pygitnexus.auto_gen",
+    "pygitnexus.auto_gen.playwright_generator",
+    "pygitnexus.cli.autogen",
     # Group
     "pygitnexus.core.group",
     "pygitnexus.core.group.config_parser",
@@ -74,6 +82,7 @@ hiddenimports = [
 
 # Data files: tree-sitter grammars + kuzu native libs
 datas = [
+    (str(tshtml_dir), "tree_sitter_html"),
     (str(tsjava_dir), "tree_sitter_java"),
     (str(tsjs_dir), "tree_sitter_javascript"),
     (str(tsts_dir), "tree_sitter_typescript"),

@@ -1,16 +1,20 @@
-"""Parse HTML/Thymeleaf template files.
+"""Parse HTML/Thymeleaf template files using tree-sitter-html.
 
 Strategy:
-1. Extract <script> blocks and parse with tree-sitter JavaScript parser
-2. Extract form actions (<form action="...">) as HTTP endpoint references
-3. Extract inline event handlers (onclick, onsubmit) with URL patterns
-4. Extract window.location.href assignments as navigation targets
+1. tree-sitter-html AST parsing for structure (elements, attributes, text)
+2. Extract <script> blocks → parse with tree-sitter JavaScript parser
+3. Extract form actions, event handlers, navigation via AST queries
+4. Retain regex fallbacks for Thymeleaf-specific syntax (th:action, etc.)
 """
 
 from __future__ import annotations
 
 import os
 import re
+from dataclasses import dataclass, field
+from tree_sitter import Language, Parser
+
+import tree_sitter_html
 
 from .extractor_js import parse as parse_js
 from .models import (
@@ -20,12 +24,49 @@ from .models import (
 )
 
 
-def parse(file_path: str, content: bytes) -> ParsedFile:
-    """Parse an HTML template file.
+@dataclass
+class HTMLEventBinding:
+    """Represents an event binding extracted from HTML/Vue template."""
+    element_tag: str          # HTML tag name, e.g. "button", "form", "input"
+    element_attrs: dict[str, str]  # All attributes as dict
+    event_type: str           # e.g. "click", "submit", "input", "change"
+    handler_expr: str         # The expression/handler, e.g. "onSubmit()", "handleClick"
+    line: int                 # Source line number
+    element_text: str = ""    # Text content of the element (for button labels etc.)
 
-    Extracts JavaScript from <script> blocks and re-parses via the JS extractor,
-    then additionally extracts form actions, URL navigations, and inline event handlers
-    from the HTML template itself.
+
+@dataclass
+class HTMLFormField:
+    """Represents a form field extracted from HTML/Vue template."""
+    field_type: str           # "text", "password", "email", "select", "textarea", "checkbox", "radio", "hidden", "file"
+    field_name: str           # name attribute
+    field_id: str             # id attribute
+    placeholder: str          # placeholder text
+    required: bool            # whether field is required
+    label: str                # associated label text
+    line: int                 # Source line number
+    parent_form_action: str = ""   # parent form's action URL
+    parent_form_method: str = "GET"  # parent form's HTTP method
+
+
+def _get_language() -> Language:
+    """Get tree-sitter-html Language singleton."""
+    return Language(tree_sitter_html.language())
+
+
+def _get_parser() -> Parser:
+    """Get a tree-sitter Parser configured for HTML."""
+    lang = _get_language()
+    return Parser(lang)
+
+
+def parse(file_path: str, content: bytes) -> ParsedFile:
+    """Parse an HTML template file using tree-sitter-html AST.
+
+    1. Parse full HTML with tree-sitter-html
+    2. Extract <script> blocks → parse via JS extractor
+    3. Extract form actions, event bindings, navigation via AST queries
+    4. Extract form fields for operation set generation
     """
     source = content.decode("utf-8", errors="replace")
     html_name = os.path.basename(file_path)
@@ -33,7 +74,7 @@ def parse(file_path: str, content: bytes) -> ParsedFile:
     result = ParsedFile(file_path=file_path)
 
     # 1. Extract and parse all <script> blocks via JS extractor
-    script_blocks = _extract_script_blocks(source)
+    script_blocks = _extract_script_blocks_ast(source)
     if script_blocks:
         combined = "\n".join(script_blocks)
         js_result = parse_js(file_path, combined.encode("utf-8"))
@@ -43,41 +84,293 @@ def parse(file_path: str, content: bytes) -> ParsedFile:
         result.imports.extend(js_result.imports)
         result.annotations.extend(js_result.annotations)
 
-    # 2. Extract form actions → call to backend URL
-    _extract_form_actions(source, file_path, html_name, result)
+    # 2. Parse full HTML AST
+    parser = _get_parser()
+    tree = parser.parse(content)
 
-    # 3. Extract window.location.href assignments as navigation calls
-    _extract_location_nav(source, file_path, html_name, result)
+    # 3. Extract form actions, event bindings, navigation via AST
+    _extract_ast_based_info(tree, source, file_path, html_name, result)
 
-    # 4. Extract $.ajax / $.get / $.post calls from inline scripts
-    _extract_jquery_ajax(source, file_path, html_name, result)
-
-    # 5. Extract fetch() calls
-    _extract_fetch_calls(source, file_path, html_name, result)
+    # 4. Fallback: regex-based extraction for Thymeleaf-specific syntax
+    _extract_thymeleaf_forms(source, file_path, html_name, result)
 
     return result
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Script block extraction via AST
 # ---------------------------------------------------------------------------
 
-def _extract_script_blocks(source: str) -> list[str]:
-    """Extract content of all <script> blocks (not <script src=...>)."""
+def _extract_script_blocks_ast(source: str) -> list[str]:
+    """Extract <script> block contents using AST traversal."""
     blocks: list[str] = []
-    # Match <script ...>...</script> — but skip ones that only have src (external)
-    pattern = r"<script[^>]*>([\s\S]*?)</script>"
-    for match in re.finditer(pattern, source):
-        body = match.group(1).strip()
-        # Skip empty blocks and external-only scripts
-        if body and "src=" not in match.group(0)[:50] or body:
-            # Check if the script tag has a src attribute pointing to external file
-            tag = match.group(0)[:match.group(0).index(">")]
-            if "src=" in tag and not body:
+    parser = _get_parser()
+    tree = parser.parse(source.encode("utf-8"))
+
+    for script_el in _walk_elements(tree.root_node, "element"):
+        tag_name = _get_tag_name(script_el)
+        if tag_name != "script":
+            continue
+
+        start_tag = _find_child(script_el, "start_tag")
+        if start_tag:
+            # Check if script has src attribute (external)
+            has_src = False
+            for attr in _walk_elements(start_tag, "attribute"):
+                name_node = _find_child(attr, "attribute_name")
+                if name_node and name_node.text.decode("utf-8", errors="replace") == "src":
+                    has_src = True
+                    break
+            if has_src:
                 continue
-            if body:
-                blocks.append(body)
+
+        # Get text children (not element children)
+        text_parts = []
+        for child in script_el.children:
+            if child.type == "text":
+                text_parts.append(child.text.decode("utf-8", errors="replace"))
+            elif child.type == "raw_text":
+                text_parts.append(child.text.decode("utf-8", errors="replace"))
+
+        text = "\n".join(text_parts).strip()
+        if text:
+            blocks.append(text)
+
     return blocks
+
+
+# ---------------------------------------------------------------------------
+# AST-based extraction
+# ---------------------------------------------------------------------------
+
+def _extract_ast_based_info(
+    tree, source: str, file_path: str, html_name: str, result: ParsedFile,
+) -> None:
+    """Extract HTTP endpoints, event bindings, and form fields from HTML AST."""
+    for el in _walk_elements(tree.root_node, "element"):
+        tag_name = _get_tag_name(el)
+        if not tag_name:
+            continue
+
+        attrs = _get_attributes(el)
+        line = _node_line(el, source)
+
+        # Form actions
+        if tag_name == "form":
+            action = attrs.get("action", "")
+            method = attrs.get("method", "GET").upper()
+            if action and not action.startswith("#") and not action.startswith("javascript:"):
+                _add_endpoint_call(result, html_name, _normalize_url(action), method, line)
+
+            # Extract form fields
+            _extract_form_fields(el, source, action, method, result)
+
+        # Inline event handlers (onclick, onsubmit, oninput, onchange, etc.)
+        _extract_inline_handlers(el, tag_name, attrs, source, html_name, result)
+
+        # window.location in script blocks (already handled by JS parser)
+        # <a href> navigation
+        if tag_name == "a":
+            href = attrs.get("href", "")
+            if href and not href.startswith("#") and not href.startswith("javascript:") and not href.startswith("mailto:"):
+                _add_endpoint_call(result, html_name, _normalize_url(href), "GET", line)
+
+
+def _extract_inline_handlers(
+    el, tag_name: str, attrs: dict[str, str], source: str, html_name: str, result: ParsedFile,
+) -> None:
+    """Extract inline event handlers like onclick, onsubmit, etc."""
+    event_map = {
+        "onclick": "click",
+        "onsubmit": "submit",
+        "oninput": "input",
+        "onchange": "change",
+        "onmouseover": "hover",
+        "onkeydown": "keypress",
+        "onkeyup": "keypress",
+        "onfocus": "focus",
+        "onblur": "blur",
+    }
+
+    for attr_name, op_type in event_map.items():
+        handler = attrs.get(attr_name, "")
+        if handler:
+            line = _node_line(el, source)
+            # Extract function name from handler expression
+            fn_match = re.search(r'\b([a-zA-Z_$][\w$]*)\s*\(', handler)
+            handler_name = fn_match.group(1) if fn_match else handler.strip()
+
+            # For navigation handlers
+            if "location" in handler.lower():
+                loc_match = re.search(r'''['"]([^'"]+)['"]''', handler)
+                if loc_match:
+                    _add_endpoint_call(result, html_name, _normalize_url(loc_match.group(1)), "GET", line)
+            else:
+                result.calls.append(CallSite(
+                    caller_method=html_name,
+                    caller_class="",
+                    target_name=handler_name,
+                    line=line,
+                    receiver=None,
+                    receiver_type=None,
+                ))
+
+
+def _extract_form_fields(
+    form_el, source: str, form_action: str, form_method: str, result: ParsedFile,
+) -> None:
+    """Extract all form fields from a form element."""
+    for el in _walk_elements(form_el, "element"):
+        tag = _get_tag_name(el)
+        if tag in ("input", "select", "textarea"):
+            attrs = _get_attributes(el)
+            field_type = attrs.get("type", "text") if tag == "input" else tag
+            field_name = attrs.get("name", "")
+            field_id = attrs.get("id", "")
+            placeholder = attrs.get("placeholder", "")
+            required = "required" in attrs
+            line = _node_line(el, source)
+
+            # Find associated label
+            label = ""
+            if field_id:
+                # Look for <label for="field_id">
+                for lbl in _walk_elements(form_el, "element"):
+                    if _get_tag_name(lbl) == "label":
+                        lbl_attrs = _get_attributes(lbl)
+                        if lbl_attrs.get("for") == field_id:
+                            label = _get_text_content(lbl, source)
+                            break
+            if not label:
+                # Fallback: look for text in preceding sibling
+                label = _get_text_content(el, source)[:50]
+
+            result.methods.append(MethodDef(
+                name=f"FormField({field_name or field_id})",
+                class_name="",
+                file_path=result.file_path,
+                start_line=line,
+                end_line=line,
+                return_type="",
+                is_static=False,
+                is_public=True,
+                is_constructor=False,
+                content=f"FormField: type={field_type}, name={field_name}, id={field_id}, placeholder={placeholder}, required={required}, label={label}",
+            ))
+
+
+# ---------------------------------------------------------------------------
+# Thymeleaf fallback
+# ---------------------------------------------------------------------------
+
+_TH_FORM_ACTION_RE = re.compile(
+    r"<form\b[^>]+th:action\s*=\s*[\"']@{([^}]+)}[\"']",
+    re.IGNORECASE,
+)
+
+
+def _extract_thymeleaf_forms(
+    source: str, file_path: str, html_name: str, result: ParsedFile,
+) -> None:
+    """Extract Thymeleaf th:action="@{/path}" forms (not handled by tree-sitter)."""
+    for match in _TH_FORM_ACTION_RE.finditer(source):
+        action_url = match.group(1)
+        if not action_url:
+            continue
+        form_tag = source[match.start():match.start() + 200]
+        method_match = re.search(r'\bmethod\s*=\s*["\'](\w+)["\']', form_tag, re.IGNORECASE)
+        http_method = (method_match.group(1).upper() if method_match else "GET")
+        _add_endpoint_call(
+            result, html_name, _normalize_url(action_url), http_method,
+            _line_number_at(source, match.start()),
+        )
+
+
+# ---------------------------------------------------------------------------
+# AST helpers
+# ---------------------------------------------------------------------------
+
+def _walk_elements(node, tag_type: str = "element"):
+    """Recursively walk all element nodes in the tree."""
+    if node.type == tag_type:
+        yield node
+    for child in node.children:
+        yield from _walk_elements(child, tag_type)
+
+
+def _find_child(node, child_type: str):
+    """Find first child of given type."""
+    for child in node.children:
+        if child.type == child_type:
+            return child
+    return None
+
+
+def _get_tag_name(el) -> str:
+    """Extract tag name from an element node."""
+    start_tag = _find_child(el, "start_tag")
+    if not start_tag:
+        return ""
+    tag_name_node = _find_child(start_tag, "tag_name")
+    if tag_name_node:
+        return tag_name_node.text.decode("utf-8", errors="replace")
+    return ""
+
+
+def _get_attributes(el) -> dict[str, str]:
+    """Extract all attributes from an element as a dict."""
+    attrs: dict[str, str] = {}
+    start_tag = _find_child(el, "start_tag")
+    if not start_tag:
+        return attrs
+
+    for attr in start_tag.children:
+        if attr.type == "attribute":
+            name_node = _find_child(attr, "attribute_name")
+            if not name_node:
+                continue
+            name = name_node.text.decode("utf-8", errors="replace")
+
+            # Vue directives: @click, :prop, v-on:click, v-bind:prop
+            if name.startswith(("@", ":", "v-")):
+                value_node = _find_child(attr, "quoted_attribute_value")
+                if value_node:
+                    # quoted_attribute_value has "..."  — get inner text
+                    inner = ""
+                    for gc in value_node.children:
+                        if gc.type == "attribute_value":
+                            inner = gc.text.decode("utf-8", errors="replace")
+                    attrs[name] = inner
+                else:
+                    attrs[name] = ""
+                continue
+
+            value_node = _find_child(attr, "quoted_attribute_value")
+            if value_node:
+                inner = ""
+                for gc in value_node.children:
+                    if gc.type == "attribute_value":
+                        inner = gc.text.decode("utf-8", errors="replace")
+                attrs[name.lower()] = inner
+            else:
+                # Boolean attribute (no value)
+                attrs[name.lower()] = "true"
+
+    return attrs
+
+
+def _get_text_content(el, source: str) -> str:
+    """Extract text content from an element (for labels, button text, etc.)."""
+    parts = []
+    for child in el.children:
+        if child.type in ("text", "raw_text"):
+            parts.append(child.text.decode("utf-8", errors="replace").strip())
+    return " ".join(p for p in parts if p)
+
+
+def _node_line(node, source: str) -> int:
+    """Get 1-based line number for a tree-sitter node."""
+    return node.start_point[0] + 1
 
 
 def _line_number_at(source: str, pos: int) -> int:
@@ -85,184 +378,36 @@ def _line_number_at(source: str, pos: int) -> int:
     return source[:pos].count("\n") + 1
 
 
-# ---------------------------------------------------------------------------
-# Form action extraction
-# ---------------------------------------------------------------------------
+def _extract_script_blocks(source: str) -> list[str]:
+    """Extract content of all <script> blocks (not <script src=...>).
 
-_FORM_ACTION_RE = re.compile(
-    r"<form\b[^>]+(?:action)\s*=\s*[\"']([^\"'>]*)[\"']",
-    re.IGNORECASE,
-)
-_TH_FORM_ACTION_RE = re.compile(
-    r"<form\b[^>]+th:action\s*=\s*[\"']@{([^}]+)}[\"']",
-    re.IGNORECASE,
-)
-
-
-def _extract_form_actions(
-    source: str, file_path: str, html_name: str, result: ParsedFile,
-) -> None:
-    """Extract <form action="..."> as backend URL references.
-
-    Creates a CallSite with target_name derived from the URL path,
-    and stores the HTTP path in the CallSite for USES_ENDPOINT matching.
+    Regex fallback for cases where AST parsing might miss something.
     """
-    # Standard HTML form actions
-    for match in _FORM_ACTION_RE.finditer(source):
-        action_url = match.group(1)
-        if not action_url or action_url.startswith("#") or action_url.startswith("javascript:"):
-            continue
-
-        # Determine HTTP method (forms with method attribute)
-        form_tag = source[match.start():match.start() + 200]
-        method_match = re.search(r'\bmethod\s*=\s*["\'](\w+)["\']', form_tag, re.IGNORECASE)
-        http_method = (method_match.group(1).upper() if method_match else "GET")
-
-        _add_endpoint_call(
-            result, html_name, _normalize_url(action_url), http_method,
-            _line_number_at(source, match.start()),
-        )
-
-    # Thymeleaf th:action="@{/path}"
-    for match in _TH_FORM_ACTION_RE.finditer(source):
-        action_url = match.group(1)
-        if not action_url:
-            continue
-
-        form_tag = source[match.start():match.start() + 200]
-        method_match = re.search(r'\bmethod\s*=\s*["\'](\w+)["\']', form_tag, re.IGNORECASE)
-        http_method = (method_match.group(1).upper() if method_match else "GET")
-
-        _add_endpoint_call(
-            result, html_name, _normalize_url(action_url), http_method,
-            _line_number_at(source, match.start()),
-        )
+    blocks: list[str] = []
+    pattern = r"<script[^>]*>([\s\S]*?)</script>"
+    for match in re.finditer(pattern, source):
+        body = match.group(1).strip()
+        if body:
+            tag = match.group(0)[:match.group(0).index(">")]
+            if "src=" in tag and not body:
+                continue
+            blocks.append(body)
+    return blocks
 
 
 # ---------------------------------------------------------------------------
-# window.location.href / assign / replace
-# ---------------------------------------------------------------------------
-
-_LOCATION_NAV_RE = re.compile(
-    r"(?:window\.location\.(?:href|assign|replace)|location\.(?:href|assign|replace))\s*=\s*[\"']([^\"'>]+)[\"']",
-)
-
-
-def _extract_location_nav(
-    source: str, file_path: str, html_name: str, result: ParsedFile,
-) -> None:
-    """Extract window.location.href = 'url' patterns."""
-    for match in _LOCATION_NAV_RE.finditer(source):
-        url = match.group(1)
-        if not url or url.startswith("#") or url.startswith("javascript:"):
-            continue
-
-        _add_endpoint_call(
-            result, html_name, _normalize_url(url), "GET",
-            _line_number_at(source, match.start()),
-        )
-
-
-# ---------------------------------------------------------------------------
-# $.ajax() extraction from HTML
-# ---------------------------------------------------------------------------
-
-_JQUERY_AJAX_RE = re.compile(
-    r"\$\.(ajax|get|post|put|delete|patch)\s*\(",
-)
-
-# Match $.ajax({ ..., type: 'POST', url: '/path', ... })
-_AJAX_CONFIG_RE = re.compile(
-    r"\$\.ajax\s*\(\s*\{([^}]+)\}",
-    re.DOTALL,
-)
-
-# Match $.get('/path', ...) / $.post('/path', ...)
-_JQUERY_SHORT_RE = re.compile(
-    r"\$\.(get|post|put|delete|patch)\s*\(\s*[\"']([^\"'>]+)[\"']",
-)
-
-
-def _extract_jquery_ajax(
-    source: str, file_path: str, html_name: str, result: ParsedFile,
-) -> None:
-    """Extract jQuery AJAX calls from HTML script blocks."""
-    # $.ajax({ type: 'POST', url: '/path', ... })
-    for match in _AJAX_CONFIG_RE.finditer(source):
-        config = match.group(1)
-        url_match = re.search(r"""url\s*:\s*["']([^"']+)["']""", config)
-        type_match = re.search(r"""(?:type|method)\s*:\s*["'](\w+)["']""", config, re.IGNORECASE)
-        if url_match:
-            http_method = (type_match.group(1).upper() if type_match else "GET")
-            _add_endpoint_call(
-                result, html_name, _normalize_url(url_match.group(1)), http_method,
-                _line_number_at(source, match.start()),
-            )
-
-    # $.get('/path', ...) / $.post('/path', ...)
-    for match in _JQUERY_SHORT_RE.finditer(source):
-        method = match.group(1).upper()
-        url = match.group(2)
-        _add_endpoint_call(
-            result, html_name, _normalize_url(url), method,
-            _line_number_at(source, match.start()),
-        )
-
-
-# ---------------------------------------------------------------------------
-# fetch() extraction
-# ---------------------------------------------------------------------------
-
-_FETCH_RE = re.compile(
-    r"\bfetch\s*\(\s*[\"']([^\"'>]+)[\"']",
-)
-
-
-def _extract_fetch_calls(
-    source: str, file_path: str, html_name: str, result: ParsedFile,
-) -> None:
-    """Extract fetch('/path') calls from HTML script blocks."""
-    for match in _FETCH_RE.finditer(source):
-        url = match.group(1)
-        # Check if this is not in a <script src=...> external reference
-        if not url or url.startswith("#") or url.startswith("javascript:"):
-            continue
-
-        # Try to determine method from the second argument
-        context = source[match.end():match.end() + 200]
-        method_match = re.search(r"""method\s*:\s*["'](\w+)["']""", context, re.IGNORECASE)
-        http_method = (method_match.group(1).upper() if method_match else "GET")
-
-        _add_endpoint_call(
-            result, html_name, _normalize_url(url), http_method,
-            _line_number_at(source, match.start()),
-        )
-
-
-# ---------------------------------------------------------------------------
-# Utility
+# URL normalization and endpoint call creation
 # ---------------------------------------------------------------------------
 
 def _normalize_url(url: str) -> str:
-    """Normalize a URL path for matching against Spring routes.
-
-    - Remove leading ./ and ../
-    - Ensure leading /
-    - Strip query parameters
-    """
-    # Strip query params
+    """Normalize a URL path for matching against Spring routes."""
     if "?" in url:
         url = url.split("?", 1)[0]
-
-    # Remove leading ./ and ../
     while url.startswith("./") or url.startswith("../"):
         url = url.lstrip(".")
         url = url.lstrip("/")
-
-    # Ensure leading /
     if not url.startswith("/"):
         url = "/" + url
-
     return url
 
 
@@ -273,15 +418,7 @@ def _add_endpoint_call(
     http_method: str,
     line: int,
 ) -> None:
-    """Add a CallSite for an HTTP endpoint reference from HTML.
-
-    The target_name is derived from the path for cross-reference.
-    The http_path and http_method are stored for USES_ENDPOINT matching.
-    Also creates a synthetic MethodDef for the HTML file so the pipeline
-    can resolve the caller_id for USES_ENDPOINT relations.
-    """
-    # Derive a symbolic target name from the path for display purposes
-    # e.g., /saveOrder → saveOrder, /personal/updateInfo → updateInfo
+    """Add a CallSite for an HTTP endpoint reference from HTML."""
     target_name = http_path.rstrip("/").split("/")[-1] or "index"
 
     result.calls.append(CallSite(
@@ -295,8 +432,7 @@ def _add_endpoint_call(
         http_path=http_path,
     ))
 
-    # Create a synthetic MethodDef for this HTML file if not already present.
-    # This allows the pipeline to resolve caller_id in CALLS and USES_ENDPOINT.
+    # Create synthetic MethodDef for this HTML file
     if not any(m.name == html_name and m.file_path == result.file_path for m in result.methods):
         result.methods.append(MethodDef(
             name=html_name,
