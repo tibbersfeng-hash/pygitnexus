@@ -56,15 +56,25 @@ jobs:
           TEST_DIR="tests/fixtures/simple"
 
           echo "=== pygitnexus CLI Smoke Test on Windows ==="
+          echo "Shell: $(bash --version | head -1)"
+          echo "PWD: $(pwd)"
           echo "Binary: $BINARY"
-          echo "Working dir: $(pwd)"
           echo "Binary exists: $(test -f "$BINARY" && echo yes || echo no)"
+          echo "Binary size: $(du -h "$BINARY" 2>/dev/null || echo 'N/A')"
           echo "Test fixtures: $(test -d "$TEST_DIR" && echo yes || echo no)"
+          echo "dist/ contents: $(ls dist/ 2>&1 || echo 'N/A')"
+          echo ""
+
+          # 0. Basic binary sanity check
+          echo "----------------------------------------"
+          echo "[0/10] Sanity: binary --version"
+          echo "----------------------------------------"
+          "$BINARY" --version 2>&1 || echo "(binary --version failed or crashed)"
           echo ""
 
           # 1. analyze (requires test fixtures)
           echo "----------------------------------------"
-          echo "[1/8] Testing: analyze"
+          echo "[1/10] Testing: analyze"
           echo "----------------------------------------"
           "$BINARY" analyze "$TEST_DIR" 2>&1 || echo "(analyze exited with error or fixtures missing)"
           echo "  PASS: analyze completed"
@@ -72,7 +82,7 @@ jobs:
 
           # 2. list
           echo "----------------------------------------"
-          echo "[2/8] Testing: list"
+          echo "[2/10] Testing: list"
           echo "----------------------------------------"
           "$BINARY" list 2>&1 || echo "(list exited with error)"
           echo "  PASS: list completed"
@@ -80,7 +90,7 @@ jobs:
 
           # 3. query
           echo "----------------------------------------"
-          echo "[3/8] Testing: query"
+          echo "[3/10] Testing: query"
           echo "----------------------------------------"
           "$BINARY" query "User" 2>&1 || echo "(query exited with error)"
           echo "  PASS: query completed"
@@ -88,7 +98,7 @@ jobs:
 
           # 4. cypher
           echo "----------------------------------------"
-          echo "[4/8] Testing: cypher"
+          echo "[4/10] Testing: cypher"
           echo "----------------------------------------"
           "$BINARY" cypher "MATCH (n) RETURN count(n)" 2>&1 || echo "(cypher exited with error)"
           echo "  PASS: cypher completed"
@@ -96,7 +106,7 @@ jobs:
 
           # 5. context
           echo "----------------------------------------"
-          echo "[5/8] Testing: context"
+          echo "[5/10] Testing: context"
           echo "----------------------------------------"
           "$BINARY" context "main" 2>&1 || echo "(context exited with error)"
           echo "  PASS: context completed"
@@ -104,7 +114,7 @@ jobs:
 
           # 6. status
           echo "----------------------------------------"
-          echo "[6/8] Testing: status"
+          echo "[6/10] Testing: status"
           echo "----------------------------------------"
           cd "$TEST_DIR" 2>/dev/null || true
           "$BINARY" status 2>&1 || echo "(status exited with error)"
@@ -114,7 +124,7 @@ jobs:
 
           # 7. clean
           echo "----------------------------------------"
-          echo "[7/8] Testing: clean"
+          echo "[7/10] Testing: clean"
           echo "----------------------------------------"
           "$BINARY" clean --force 2>&1 || echo "(clean exited with error)"
           echo "  PASS: clean completed"
@@ -122,7 +132,7 @@ jobs:
 
           # 8. install --file (local file copy)
           echo "----------------------------------------"
-          echo "[8/10] Testing: install --file"
+          echo "[8/11] Testing: install --file"
           echo "----------------------------------------"
           INST_DIR="$PWD/_test_install"
           mkdir -p "$INST_DIR"
@@ -146,7 +156,7 @@ jobs:
 
           # 9. install self (use installed binary to install itself to another location)
           echo "----------------------------------------"
-          echo "[9/10] Testing: install self"
+          echo "[9/11] Testing: install self"
           echo "----------------------------------------"
           INST_DIR2="$PWD/_test_self_install_src"
           mkdir -p "$INST_DIR2"
@@ -176,7 +186,7 @@ jobs:
 
           # 10. install --version latest (download from GitHub Releases)
           echo "----------------------------------------"
-          echo "[10/10] Testing: install --version latest"
+          echo "[10/11] Testing: install --version latest"
           echo "----------------------------------------"
           VER_DIR="$PWD/_test_version_install"
           mkdir -p "$VER_DIR"
@@ -201,7 +211,7 @@ jobs:
           echo ""
 
           echo "========================================"
-          echo " All 10 CLI commands smoke-tested on Windows"
+          echo " All 11 CLI commands smoke-tested on Windows"
           echo "========================================"
 
 
