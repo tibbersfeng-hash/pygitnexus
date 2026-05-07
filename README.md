@@ -73,22 +73,6 @@ chmod +x pygitnexus-vX.X.X-linux-x86_64
 ./pygitnexus-vX.X.X-linux-x86_64 --help
 ```
 
-### 方式二：从源码安装
-
-```bash
-uv sync
-```
-
-### 核心依赖
-
-| 包 | 版本 | 用途 |
-|---|------|------|
-| tree-sitter | 0.23+ | AST 解析引擎 |
-| tree-sitter-java / javascript / typescript | 最新 | 多语言语法文件 |
-| kuzu | 0.11+ | 嵌入式图数据库 |
-| click | 8.1+ | CLI 框架 |
-| mcp | 1.26+ | Model Context Protocol SDK |
-
 ## 快速开始
 
 ### 1. 索引项目
