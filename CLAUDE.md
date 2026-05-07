@@ -87,6 +87,36 @@ analyze(repo_path)
 - `LIMIT` 必须放在 `RETURN` 之后
 - KuzuDB 不支持子查询，需要拆分为多步查询
 
+## 跨平台支持（macOS / Linux / Windows）
+
+PyGitNexus 的二进制和 CLI 命令必须同时支持三种操作系统。所有新功能或修改都需考虑三平台兼容性。
+
+### GitHub Actions 构建矩阵
+
+| 平台 | Runner | 架构 | 文件名 |
+|------|--------|------|--------|
+| Linux x86_64 | ubuntu-22.04 | x86_64 | `pygitnexus-vX.X.X-linux-x86_64` |
+| Linux ARM64 | ubuntu-22.04-arm | aarch64 | `pygitnexus-vX.X.X-linux-aarch64` |
+| macOS Apple Silicon | macos-14 | arm64 | `pygitnexus-vX.X.X-macos-arm64` |
+| Windows | windows-latest | x86_64 | `pygitnexus-vX.X.X-windows-x86_64.exe` |
+
+### 跨平台开发规则
+
+1. **路径处理**: 使用 `pathlib.Path`，不要拼接 `/` 或 `\`；MCP 配置中的 command 路径统一用正斜杠 `/`
+2. **二进制名**: 检测 `pygitnexus` 和 `pygitnexus.exe`（Windows）
+3. **编辑器目录**:
+   - Linux/macOS: `~/.cursor`, `~/.claude.json`, `~/.codebuddy/`, `~/.config/opencode/`
+   - Windows: `%USERPROFILE%\.cursor`, `%USERPROFILE%\.claude.json`, `%USERPROFILE%\.codebuddy\`, `%APPDATA%\opencode\`
+4. **文件编码**: 始终指定 `encoding="utf-8"`（Windows 默认 GBK）
+5. **可执行权限**: Unix 需要 `chmod +x`，Windows 不需要
+6. **install 命令**: 自动检测平台，从 GitHub Releases 下载对应二进制，安装到系统 PATH
+
+### 安装方式
+
+仅支持二进制方式：
+- `pygitnexus install` — 自动安装到 PATH
+- 手动从 [Releases](https://github.com/tibbersfeng-hash/pygitnexus/releases) 下载对应平台二进制
+
 ## PyInstaller 注意事项
 
 - 使用 `ThreadPoolExecutor` 而非 `ProcessPoolExecutor`（子进程会重执行 bootloader）
