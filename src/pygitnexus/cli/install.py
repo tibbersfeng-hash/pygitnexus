@@ -71,6 +71,9 @@ def _detect_platform() -> tuple[str, str]:
         "arm64": "aarch64",
     }
     arch = arch_map.get(machine)
+    # Windows ARM64 falls back to x86_64 (no native ARM64 release yet)
+    if os_name == "windows" and arch == "aarch64":
+        arch = "x86_64"
     if arch is None:
         click.echo(f"  Unsupported architecture: {machine}")
         sys.exit(1)
@@ -130,22 +133,26 @@ def _find_asset(release: dict, os_name: str, arch: str) -> tuple[str, str] | Non
     Returns (asset_name, download_url) or None.
     """
     ext = ".exe" if os_name == "windows" else ""
-    target_name = f"pygitnexus-{release['tag_name']}-{os_name}-{arch}{ext}"
 
+    # macOS release assets use "arm64" instead of "aarch64"
+    search_arch = [f"{os_name}-{arch}"]
+    if os_name == "macos" and arch == "aarch64":
+        search_arch.append("macos-arm64")
+
+    candidates = []
     for asset in release.get("assets", []):
         name = asset.get("name", "")
-        # Try exact match first
-        if name == target_name:
-            return name, asset["browser_download_url"]
-        # Try partial match (OS + arch)
-        if f"pygitnexus-" in name and f"-{os_name}-" in name and f"-{arch}" in name:
-            return name, asset["browser_download_url"]
+        for sa in search_arch:
+            if f"pygitnexus-" in name and f"-{sa}" in name:
+                candidates.append((name, asset["browser_download_url"]))
+                break
 
-    # Fallback: any binary matching os-arch pattern
-    for asset in release.get("assets", []):
-        name = asset.get("name", "")
-        if name.endswith(ext) and f"-{os_name}-{arch}" in name:
-            return name, asset["browser_download_url"]
+    if candidates:
+        # Prefer exact arch match, then first available
+        for name, url in candidates:
+            if f"-{os_name}-{arch}" in name:
+                return name, url
+        return candidates[0]
 
     return None
 
@@ -180,16 +187,21 @@ def _download_file(url: str, dest: Path) -> bool:
 @click.option("--path", "-p", "install_path", default=None, type=click.Path(),
               help="Install to specific directory (default: first writable PATH dir)")
 @click.option("--force", "-f", is_flag=True, default=False, help="Overwrite existing binary")
-def install_cmd(version: str | None, install_path: str | None, force: bool) -> None:
+@click.option("--file", "local_file", default=None, type=click.Path(exists=True),
+              help="Install from a local binary file instead of downloading from GitHub")
+def install_cmd(version: str | None, install_path: str | None, force: bool, local_file: str | None) -> None:
     """Download and install pygitnexus binary to system PATH.
 
-    Automatically detects the current platform and downloads the latest
-    release from GitHub.
+    Priority:
+      1. --file PATH     : Copy specified local binary
+      2. Running binary   : Install self (PyInstaller build)
+      3. From source      : Download from GitHub Releases
 
     Examples:
-        pygitnexus install              # Latest version
-        pygitnexus install -v v1.0.0    # Specific version
-        pygitnexus install -p /usr/local/bin  # Custom path
+        pygitnexus install                  # Install self or download from GitHub
+        pygitnexus install -v v1.0.0        # Specific version from GitHub
+        pygitnexus install -p /usr/local/bin  # Custom install directory
+        pygitnexus install --file ./dist/pygitnexus  # From local file
     """
     click.echo("")
     click.echo("  PyGitNexus Installer")
@@ -202,6 +214,116 @@ def install_cmd(version: str | None, install_path: str | None, force: bool) -> N
     click.echo(f"  Python:   {platform.python_version()}")
     click.echo("")
 
+    # Determine install destination
+    if install_path:
+        dest_dir = Path(install_path)
+    else:
+        dest_dir = _get_install_path()
+
+    if dest_dir is None:
+        click.echo("  Error: Could not find a writable install directory.")
+        click.echo("  Use --path to specify a directory manually.")
+        return
+
+    binary_name = "pygitnexus.exe" if os_name == "windows" else "pygitnexus"
+    dest_file = dest_dir / binary_name
+
+    # Check existing
+    if dest_file.exists() and not force:
+        click.echo(f"  Binary already exists at: {dest_file}")
+        click.echo("  Use --force to overwrite.")
+        return
+
+    # --- Mode 1: --file (explicit local file) ---
+    if local_file:
+        click.echo(f"  Source:   {local_file} (local file)")
+        click.echo(f"  Install:  {dest_dir}")
+        click.echo("")
+        _install_binary(Path(local_file).resolve(), dest_file, dest_dir)
+        return
+
+    # --- Mode 2: Running as PyInstaller binary? Install self ---
+    self_binary = _find_self_binary()
+    if self_binary and self_binary.is_file():
+        click.echo(f"  Source:   {self_binary} (self)")
+        click.echo(f"  Install:  {dest_dir}")
+        click.echo("")
+        _install_binary(self_binary, dest_file, dest_dir)
+        return
+
+    # --- Mode 3: Running from source, download from GitHub ---
+    click.echo(f"  Running from source, downloading from GitHub...")
+    click.echo("")
+    _install_from_github(version, os_name, arch, dest_dir, dest_file, force)
+
+
+def _find_self_binary() -> Path | None:
+    """Detect if running as a PyInstaller binary and return the binary path."""
+    # PyInstaller sets sys.frozen
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve()
+    # Also check if sys.argv[0] is a binary outside the package
+    argv0 = Path(sys.argv[0]).resolve()
+    if argv0.name.startswith("pygitnexus") and argv0.is_file():
+        # Verify it's a binary (not a Python script)
+        try:
+            with open(argv0, "rb") as f:
+                header = f.read(4)
+                # ELF or Mach-O or PE header
+                if header[:4] in (b"\x7fELF", b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"MZ"):
+                    return argv0
+        except OSError:
+            pass
+    return None
+
+
+def _install_binary(src: Path, dest_file: Path, dest_dir: Path) -> None:
+    """Copy a local binary to the install destination."""
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(src), str(dest_file))
+        click.echo(f"  Copied: {src} -> {dest_file}")
+
+        # Set executable on Unix
+        if sys.platform != "win32":
+            current = dest_file.stat().st_mode
+            dest_file.chmod(current | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    except OSError as e:
+        click.echo(f"  Error: {e}")
+        return
+
+    click.echo("")
+    _verify_and_report(dest_file)
+    click.echo("")
+
+
+def _verify_and_report(dest_file: Path) -> None:
+    """Verify the installed binary and report result."""
+    click.echo("  Verifying installation...")
+    try:
+        result = os.popen(f'"{dest_file}" --version').read().strip()
+        if result:
+            click.echo(f"  Version:  {result}")
+            click.echo("")
+            click.echo("  Success! pygitnexus is now available in your PATH.")
+        else:
+            click.echo(f"  Warning: Binary installed but --version returned empty.")
+            click.echo(f"  You may need to add this directory to your PATH:")
+            click.echo(f"    {dest_file.parent}")
+    except Exception:
+        click.echo(f"  Installed but could not verify. Add to PATH:")
+        click.echo(f"    {dest_file.parent}")
+
+
+def _install_from_github(
+    version: str | None,
+    os_name: str,
+    arch: str,
+    dest_dir: Path,
+    dest_file: Path,
+    force: bool,
+) -> None:
+    """Download and install from GitHub Releases."""
     # Fetch release
     headers = _github_headers()
     if version:
@@ -211,7 +333,7 @@ def install_cmd(version: str | None, install_path: str | None, force: bool) -> N
         try:
             resp = httpx.get(f"{GITHUB_API}/tags/{version}", headers=headers, timeout=30)
             if resp.status_code == 404:
-                resp = httpx.get(f"{GITHUB_API}", headers=headers, params={"per_page": 20}, timeout=30)
+                resp = httpx.get(GITHUB_API, headers=headers, params={"per_page": 20}, timeout=30)
                 release = None
                 for r in resp.json():
                     if r.get("tag_name") == version:
@@ -236,7 +358,11 @@ def install_cmd(version: str | None, install_path: str | None, force: bool) -> N
     # Find asset
     asset_info = _find_asset(release, os_name, arch)
     if asset_info is None:
-        click.echo(f"  Error: No binary available for {os_name}-{arch}")
+        # Show what we were looking for
+        if os_name == "macos" and arch == "aarch64":
+            click.echo(f"  Error: No binary available for {os_name}-{arch} or {os_name}-arm64")
+        else:
+            click.echo(f"  Error: No binary available for {os_name}-{arch}")
         click.echo(f"  Available assets:")
         for asset in release.get("assets", []):
             click.echo(f"    - {asset['name']}")
@@ -244,30 +370,8 @@ def install_cmd(version: str | None, install_path: str | None, force: bool) -> N
 
     asset_name, download_url = asset_info
     click.echo(f"  Binary:   {asset_name}")
-
-    # Determine install path
-    if install_path:
-        dest_dir = Path(install_path)
-    else:
-        dest_dir = _get_install_path()
-
-    if dest_dir is None:
-        click.echo("  Error: Could not find a writable install directory.")
-        click.echo("  Use --path to specify a directory manually.")
-        return
-
     click.echo(f"  Install:  {dest_dir}")
     click.echo("")
-
-    # Determine binary name
-    binary_name = "pygitnexus.exe" if os_name == "windows" else "pygitnexus"
-    dest_file = dest_dir / binary_name
-
-    # Check existing
-    if dest_file.exists() and not force:
-        click.echo(f"  Binary already exists at: {dest_file}")
-        click.echo("  Use --force to overwrite.")
-        return
 
     # Download to temp file first
     temp_file = dest_dir / f".pygitnexus-download-{os_name}-{arch}"
@@ -288,21 +392,7 @@ def install_cmd(version: str | None, install_path: str | None, force: bool) -> N
         click.echo(f"  Installed: {dest_file}")
         click.echo("")
 
-        # Verify
-        click.echo("  Verifying installation...")
-        try:
-            result = os.popen(f'"{dest_file}" --version').read().strip()
-            if result:
-                click.echo(f"  Version:  {result}")
-                click.echo("")
-                click.echo("  Success! pygitnexus is now available in your PATH.")
-            else:
-                click.echo(f"  Warning: Binary installed but --version returned empty.")
-                click.echo(f"  You may need to add this directory to your PATH:")
-                click.echo(f"    {dest_dir}")
-        except Exception:
-            click.echo(f"  Installed but could not verify. Add to PATH:")
-            click.echo(f"    {dest_dir}")
+        _verify_and_report(dest_file)
 
     except Exception as e:
         click.echo(f"  Error: {e}")

@@ -111,8 +111,10 @@ class GraphStore:
                 writer.writerow(headers)
                 for row in rows:
                     writer.writerow([row.get(h, "") for h in headers])
+            # Use forward slashes to avoid Windows backslash escape issues in Cypher
+            safe_path = csv_path.replace("\\", "/")
             self._execute(
-                f"COPY {table} FROM '{csv_path}' (header=true)"
+                f"COPY {table} FROM '{safe_path}' (header=true)"
             )
         finally:
             os.remove(csv_path)
@@ -142,7 +144,9 @@ class GraphStore:
                 writer.writerow(node_headers)
                 for row in rows:
                     writer.writerow([row.get(h, "") for h in node_headers])
-            self._execute(f"COPY {table} FROM '{node_csv}' (header=true, parallel=false)")
+            # Use forward slashes to avoid Windows backslash escape issues in Cypher
+            safe_node = node_csv.replace("\\", "/")
+            self._execute(f"COPY {table} FROM '{safe_node}' (header=true, parallel=false)")
         finally:
             os.remove(node_csv)
 
@@ -157,8 +161,9 @@ class GraphStore:
                 for row in rows:
                     writer.writerow([row["from_id"], row["id"], rel_type, "1.0", reason,
                                      "", "", ""])
+            safe_rel = rel_csv.replace("\\", "/")
             self._execute(
-                f"COPY CodeRelation FROM '{rel_csv}' "
+                f"COPY CodeRelation FROM '{safe_rel}' "
                 f"(header=true, from='{from_table}', to='{table}')"
             )
         finally:
@@ -270,8 +275,9 @@ class GraphStore:
                         for col in extra_columns:
                             row.append(r.get(col, "") or "")
                     writer.writerow(row)
+            safe_path = csv_path.replace("\\", "/")
             self._execute(
-                f"COPY CodeRelation FROM '{csv_path}' "
+                f"COPY CodeRelation FROM '{safe_path}' "
                 f"(header=true, from='{from_table}', to='{to_table}')"
             )
         finally:
