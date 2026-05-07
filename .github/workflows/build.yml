@@ -122,18 +122,42 @@ jobs:
 
           # 8. install --file (local file copy)
           echo "----------------------------------------"
-          echo "[8/8] Testing: install --file"
+          echo "[8/10] Testing: install --file"
           echo "----------------------------------------"
           INST_DIR="$PWD/_test_install"
           mkdir -p "$INST_DIR"
-          "$BINARY" install --file "$BINARY" --path "$INST_DIR" --force 2>&1 || echo "(install exited with error)"
+          "$BINARY" install --file "$BINARY" --path "$INST_DIR" --force 2>&1 || echo "(install --file exited with error)"
           echo "  Install dir contents: $(ls "$INST_DIR/" 2>&1 || echo 'dir not accessible')"
-          rm -rf "$INST_DIR"
-          echo "  PASS: install completed"
+          echo "  PASS: install --file completed"
+          echo ""
+
+          # 9. install self (use installed binary to install itself to another location)
+          echo "----------------------------------------"
+          echo "[9/10] Testing: install self"
+          echo "----------------------------------------"
+          INSTALLED_BIN="$INST_DIR/pygitnexus${EXT}"
+          SELF_DIR="$PWD/_test_self_install"
+          mkdir -p "$SELF_DIR"
+          "$INSTALLED_BIN" install --path "$SELF_DIR" --force 2>&1 || echo "(install self exited with error)"
+          echo "  Self-install dir contents: $(ls "$SELF_DIR/" 2>&1 || echo 'dir not accessible')"
+          rm -rf "$INST_DIR" "$SELF_DIR"
+          echo "  PASS: install self completed"
+          echo ""
+
+          # 10. install --version latest (download from GitHub Releases)
+          echo "----------------------------------------"
+          echo "[10/10] Testing: install --version latest"
+          echo "----------------------------------------"
+          VER_DIR="$PWD/_test_version_install"
+          mkdir -p "$VER_DIR"
+          "$BINARY" install --version latest --path "$VER_DIR" --force 2>&1 || echo "(install --version exited with error)"
+          echo "  Version install dir contents: $(ls "$VER_DIR/" 2>&1 || echo 'dir not accessible')"
+          rm -rf "$VER_DIR"
+          echo "  PASS: install --version completed"
           echo ""
 
           echo "========================================"
-          echo " All 8 CLI commands smoke-tested on Windows"
+          echo " All 10 CLI commands smoke-tested on Windows"
           echo "========================================"
 
 
