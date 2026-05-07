@@ -43,8 +43,15 @@ jobs:
         shell: bash
         run: |
           TAG="${GITHUB_REF_NAME#v}"
-          sed -i "s/^version = .*/version = \"${TAG}.0.0\"/" pyproject.toml
-          echo "Updated version to ${TAG}.0.0"
+          python3 -c "
+import re
+with open('pyproject.toml') as f:
+    t = f.read()
+t = re.sub(r'^version = .*', f'version = \"${TAG}.0.0\"', t, 1, re.M)
+with open('pyproject.toml', 'w') as f:
+    f.write(t)
+print(f'Updated version to ${TAG}.0.0')
+"
 
       - name: Install dependencies
         run: |
