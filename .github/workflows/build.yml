@@ -47,10 +47,9 @@ jobs:
         run: |
           uv run pyinstaller pygitnexus.spec
 
-      - name: Test all CLI commands on Windows
-        if: matrix.os == 'windows'
+      - name: Test all CLI commands
         shell: bash
-        run: bash .github/scripts/test_windows.sh
+        run: bash .github/scripts/test_cli.sh
 
 
       - name: Prepare artifact

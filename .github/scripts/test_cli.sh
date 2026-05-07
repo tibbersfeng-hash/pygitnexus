@@ -1,16 +1,24 @@
 #!/usr/bin/env bash
-# Windows CLI smoke test for PyGitNexus CI
+# Cross-platform CLI smoke test for PyGitNexus CI
 # Called from: .github/workflows/build.yml
 # All commands run with error suppression — this is a smoke test, not strict validation.
 
 set +e
 
-EXT=".exe"
+# Detect platform and set binary extension
+OS_NAME="$(uname -s)"
+if [[ "$OS_NAME" == MINGW* ]] || [[ "$OS_NAME" == MSYS* ]]; then
+    EXT=".exe"
+else
+    EXT=""
+fi
+
 BINARY="dist/pygitnexus${EXT}"
 TEST_DIR="tests/fixtures/simple"
 TAG_MAJOR="${GITHUB_REF_NAME#v}"
 
-echo "=== pygitnexus CLI Smoke Test on Windows ==="
+echo "=== pygitnexus CLI Smoke Test ==="
+echo "Platform: $OS_NAME"
 echo "PWD: $(pwd)"
 echo "Binary: $BINARY"
 echo "Binary exists: $(test -f "$BINARY" && echo yes || echo no)"
@@ -47,35 +55,35 @@ run_capture() {
 }
 
 # 0. Sanity: --version
-run_cmd "[0/11] Sanity: binary --version" "$BINARY" --version
+run_cmd "[0/12] Sanity: binary --version" "$BINARY" --version
 
 # 1. analyze
-run_cmd "[1/11] Testing: analyze" "$BINARY" analyze "$TEST_DIR"
+run_cmd "[1/12] Testing: analyze" "$BINARY" analyze "$TEST_DIR"
 
 # 2. list
-run_cmd "[2/11] Testing: list" "$BINARY" list
+run_cmd "[2/12] Testing: list" "$BINARY" list
 
 # 3. query
-run_cmd "[3/11] Testing: query" "$BINARY" query "User"
+run_cmd "[3/12] Testing: query" "$BINARY" query "User"
 
 # 4. cypher
-run_cmd "[4/11] Testing: cypher" "$BINARY" cypher "MATCH (n) RETURN count(n)"
+run_cmd "[4/12] Testing: cypher" "$BINARY" cypher "MATCH (n) RETURN count(n)"
 
 # 5. context
-run_cmd "[5/11] Testing: context" "$BINARY" context "main"
+run_cmd "[5/12] Testing: context" "$BINARY" context "main"
 
 # 6. status
 cd "$TEST_DIR" 2>/dev/null
-run_cmd "[6/11] Testing: status" "$BINARY" status
+run_cmd "[6/12] Testing: status" "$BINARY" status
 cd .. 2>/dev/null
 
 # 7. clean
-run_cmd "[7/11] Testing: clean" "$BINARY" clean --force
+run_cmd "[7/12] Testing: clean" "$BINARY" clean --force
 
 # 8. install --file
 INST_DIR="$PWD/_test_install"
 mkdir -p "$INST_DIR"
-run_capture "[8/11] Testing: install --file" "$BINARY" install --file "$BINARY" --path "$INST_DIR" --force
+run_capture "[8/12] Testing: install --file" "$BINARY" install --file "$BINARY" --path "$INST_DIR" --force
 if [ -f "$INST_DIR/pygitnexus${EXT}" ]; then
     VER_OUT=$("$INST_DIR/pygitnexus${EXT}" --version 2>/dev/null)
     echo "  Checkpoint: installed --version = $VER_OUT"
@@ -94,7 +102,7 @@ mkdir -p "$INST_DIR2"
 cp "$BINARY" "$INST_DIR2/pygitnexus${EXT}"
 SELF_DIR="$PWD/_test_self"
 mkdir -p "$SELF_DIR"
-run_capture "[9/11] Testing: install self" "$INST_DIR2/pygitnexus${EXT}" install --path "$SELF_DIR" --force
+run_capture "[9/12] Testing: install self" "$INST_DIR2/pygitnexus${EXT}" install --path "$SELF_DIR" --force
 if [ -f "$SELF_DIR/pygitnexus${EXT}" ]; then
     VER_OUT=$("$SELF_DIR/pygitnexus${EXT}" --version 2>/dev/null)
     VM="${VER_OUT%%.*}"
@@ -113,7 +121,7 @@ echo ""
 # 10. install --version latest
 VER_DIR="$PWD/_test_ver"
 mkdir -p "$VER_DIR"
-run_capture "[10/11] Testing: install --version latest" "$BINARY" install --version latest --path "$VER_DIR" --force
+run_capture "[10/12] Testing: install --version latest" "$BINARY" install --version latest --path "$VER_DIR" --force
 if [ -f "$VER_DIR/pygitnexus${EXT}" ]; then
     VER_OUT=$("$VER_DIR/pygitnexus${EXT}" --version 2>/dev/null)
     VM="${VER_OUT%%.*}"
@@ -129,8 +137,26 @@ fi
 rm -rf "$VER_DIR"
 echo ""
 
+# 11. web (starts HTTP server, runs briefly then killed)
+echo "----------------------------------------"
+echo "[11/12] Testing: web"
+echo "----------------------------------------"
+"$BINARY" web --port 18765 --no-open > /tmp/_pgn_web.txt 2>&1 &
+WEB_PID=$!
+sleep 3
+kill $WEB_PID 2>/dev/null
+WEB_OUT=$(cat /tmp/_pgn_web.txt)
+echo "$WEB_OUT"
+if echo "$WEB_OUT" | grep -qi "dashboard\|uvicorn\|18765\|starting"; then
+    echo "  Checkpoint: web server started output detected"
+    echo "  PASS CHECKPOINT: web command started"
+else
+    echo "  WARN: web command output unexpected"
+fi
+echo ""
+
 echo "========================================"
-echo " All 11 CLI commands smoke-tested on Windows"
+echo " All 12 CLI commands smoke-tested"
 echo "========================================"
 
 exit 0
