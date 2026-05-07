@@ -83,8 +83,10 @@ hiddenimports = [
     "pygitnexus.mcp.server",
 ]
 
-# Data files: tree-sitter grammars + kuzu native libs
+# Data files: tree-sitter grammars + kuzu native libs + web assets
+web_dir = Path("src/pygitnexus/web")
 datas = [
+    (str(web_dir), "pygitnexus/web"),
     (str(tshtml_dir), "tree_sitter_html"),
     (str(tsjava_dir), "tree_sitter_java"),
     (str(tsjs_dir), "tree_sitter_javascript"),
