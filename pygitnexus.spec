@@ -32,6 +32,7 @@ hiddenimports = [
     "mcp",
     "mcp.server",
     "mcp.server.fastmcp",
+    "importlib.metadata",
     # CLI commands
     "pygitnexus.cli.main",
     "pygitnexus.cli.analyze",
@@ -57,6 +58,7 @@ hiddenimports = [
     "pygitnexus.core.extractor_html",
     "pygitnexus.core.extractor_vue",
     "pygitnexus.core.operation_extractor",
+    "pygitnexus._version",
     "pygitnexus.auto_gen",
     "pygitnexus.auto_gen.playwright_generator",
     "pygitnexus.cli.autogen",

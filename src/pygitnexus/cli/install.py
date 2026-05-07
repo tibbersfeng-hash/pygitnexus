@@ -299,6 +299,7 @@ def _install_binary(src: Path, dest_file: Path, dest_dir: Path) -> None:
 
 def _verify_and_report(dest_file: Path) -> None:
     """Verify the installed binary and report result."""
+    click.echo(f"  Install path: {dest_file}")
     click.echo("  Verifying installation...")
     try:
         result = os.popen(f'"{dest_file}" --version').read().strip()

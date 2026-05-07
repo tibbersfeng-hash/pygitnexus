@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import click
 
+from pygitnexus._version import __version__
+
 from .analyze import analyze_cmd
 from .list import list_cmd
 from .status import status_cmd
@@ -20,7 +22,7 @@ from .autogen import autogen_cmd
 
 
 @click.group()
-@click.version_option(version="0.1.0", prog_name="pygitnexus")
+@click.version_option(version=__version__, prog_name="pygitnexus")
 def cli() -> None:
     """PyGitNexus — Java codebase knowledge graph builder + TestNexus testing."""
     pass
