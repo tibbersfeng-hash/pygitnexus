@@ -6,6 +6,7 @@ import os
 import platform
 import shutil
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -14,6 +15,36 @@ import httpx
 
 GITHUB_REPO = "tibbersfeng-hash/pygitnexus"
 GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
+
+# Read GitHub token for private repo access
+# Priority: GITHUB_TOKEN env > GitHub CLI token > anonymous
+def _get_github_token() -> str | None:
+    """Get GitHub auth token from environment or gh CLI."""
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        return token
+    # Try GitHub CLI token
+    try:
+        token = subprocess.check_output(
+            ["gh", "auth", "token"], stderr=subprocess.DEVNULL, text=True
+        ).strip()
+        if token:
+            return token
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        pass
+    return None
+
+
+def _github_headers() -> dict:
+    """Build GitHub API request headers with optional auth."""
+    headers = {
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "pygitnexus-installer",
+    }
+    token = _get_github_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
 
 
 def _detect_platform() -> tuple[str, str]:
@@ -72,15 +103,22 @@ def _get_install_path() -> Path | None:
 
 def _get_latest_release() -> dict | None:
     """Fetch the latest release from GitHub API."""
+    headers = _github_headers()
     try:
-        resp = httpx.get(f"{GITHUB_API}/latest", timeout=30)
+        resp = httpx.get(f"{GITHUB_API}/latest", headers=headers, timeout=30)
         if resp.status_code == 200:
             return resp.json()
         # Fallback: list releases
-        resp = httpx.get(GITHUB_API, params={"per_page": 1}, timeout=30)
+        resp = httpx.get(GITHUB_API, headers=headers, params={"per_page": 1}, timeout=30)
         if resp.status_code == 200:
             data = resp.json()
             return data[0] if data else None
+        # Print helpful error for private repos
+        if resp.status_code == 404:
+            click.echo("  Error: Release not found. If the repo is private, set GITHUB_TOKEN:")
+            click.echo("    export GITHUB_TOKEN=ghp_xxxx")
+            click.echo("    # or login with GitHub CLI: gh auth login")
+        return None
     except Exception as e:
         click.echo(f"  Warning: Could not fetch releases from GitHub: {e}")
     return None
@@ -114,8 +152,9 @@ def _find_asset(release: dict, os_name: str, arch: str) -> tuple[str, str] | Non
 
 def _download_file(url: str, dest: Path) -> bool:
     """Download a file with progress bar."""
+    headers = _github_headers()
     try:
-        with httpx.stream("GET", url, follow_redirects=True, timeout=120) as resp:
+        with httpx.stream("GET", url, headers=headers, follow_redirects=True, timeout=120) as resp:
             resp.raise_for_status()
             total = int(resp.headers.get("content-length", 0))
             downloaded = 0
@@ -164,14 +203,15 @@ def install_cmd(version: str | None, install_path: str | None, force: bool) -> N
     click.echo("")
 
     # Fetch release
+    headers = _github_headers()
     if version:
         if not version.startswith("v"):
             version = f"v{version}"
         click.echo(f"  Looking for release: {version}")
         try:
-            resp = httpx.get(f"{GITHUB_API}/tags/{version}", timeout=30)
+            resp = httpx.get(f"{GITHUB_API}/tags/{version}", headers=headers, timeout=30)
             if resp.status_code == 404:
-                resp = httpx.get(f"{GITHUB_API}", params={"per_page": 20}, timeout=30)
+                resp = httpx.get(f"{GITHUB_API}", headers=headers, params={"per_page": 20}, timeout=30)
                 release = None
                 for r in resp.json():
                     if r.get("tag_name") == version:
