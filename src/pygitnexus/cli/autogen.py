@@ -9,6 +9,7 @@ import click
 
 from ..core.operation_extractor import extract_operations_from_source
 from ..auto_gen.playwright_generator import generate_all
+from ..auto_gen.db_writer import write_to_db
 
 
 @click.command("autogen")
@@ -21,23 +22,35 @@ from ..auto_gen.playwright_generator import generate_all
     help="Output directory for generated Playwright scripts",
 )
 @click.option(
+    "--db",
+    "-d",
+    default=None,
+    type=click.Path(),
+    help="KuzuDB path for storing test scripts and operations",
+)
+@click.option(
     "--verbose",
     "-v",
     is_flag=True,
     help="Print detailed operation extraction info",
 )
-def autogen_cmd(repo_path: str, output: str, verbose: bool) -> None:
+def autogen_cmd(repo_path: str, output: str, db: str | None, verbose: bool) -> None:
     """Auto-generate Playwright tests from frontend source code.
 
     Scans a frontend project for Vue/HTML files, extracts all interactive
     operations (buttons, form fields, event handlers, API calls), and
     generates executable Playwright Python test scripts.
+
+    If --db is specified, test scripts and operations are also stored
+    in the KuzuDB graph database for querying.
     """
     repo_path = os.path.abspath(repo_path)
     output = os.path.abspath(output)
 
     click.echo(f"Scanning frontend project: {repo_path}")
     click.echo(f"Output directory: {output}")
+    if db:
+        click.echo(f"Database: {os.path.abspath(db)}")
 
     # Scan for frontend files
     frontend_extensions = {".vue", ".html", ".htm"}
@@ -105,6 +118,18 @@ def autogen_cmd(repo_path: str, output: str, verbose: bool) -> None:
     click.echo(f"\nGenerated {len(generated)} Playwright test scripts:")
     for path in generated:
         click.echo(f"  {path}")
+
+    # Write to database if specified
+    if db:
+        click.echo(f"\nWriting {len(all_op_sets)} test scripts to database...")
+        db_path = os.path.abspath(db)
+        scripts_written = write_to_db(all_op_sets, db_path, verbose=verbose)
+        click.echo(f"  Written {scripts_written} test scripts to {db_path}")
+        click.echo("")
+        click.echo("Query test scripts:")
+        click.echo(f"  uv run pygitnexus cypher \"MATCH (ts:TestScript) RETURN ts.name, ts.totalOps\" --db {db_path}")
+        click.echo("Query test operations:")
+        click.echo(f"  uv run pygitnexus cypher \"MATCH (to:TestOperation) RETURN to.opId, to.opType, to.handler\" --db {db_path}")
 
     click.echo(f"\n{'='*60}")
     click.echo("To run the generated tests:")

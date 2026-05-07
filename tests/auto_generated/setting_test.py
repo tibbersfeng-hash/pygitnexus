@@ -1,6 +1,6 @@
 """Auto-generated Playwright tests for Setting"""
 # Source: /tmp/test-projects/newbee-mall-vue3-app/src/views/Setting.vue
-# Operations: 8
+# Operations: 3
 
 import re
 import pytest
@@ -21,95 +21,57 @@ def page_setup(page: Page):
     page.wait_for_load_state("networkidle")
     return page
 
-
-def test_op_01_md5(page_setup: Page):
-    """md5 (@click) → no API call"""
-
-    # Step 1: Locate and click the element
-    page_setup.click("button")
-
-    # Step 2: Verify action result
-    page_setup.wait_for_load_state("networkidle")
-
-
-def test_op_02_EditUserInfo(page_setup: Page):
-    """EditUserInfo (@click) → no API call"""
-
-    # Step 1: Locate and click the element
-    page_setup.click("button")
-
-    # Step 2: Verify action result
-    page_setup.wait_for_load_state("networkidle")
-
-
-def test_op_03_showSuccessToast(page_setup: Page):
-    """showSuccessToast (@click) → no API call"""
-
-    # Step 1: Locate and click the element
-    page_setup.click("button")
-
-    # Step 2: Verify action result
-    page_setup.wait_for_load_state("networkidle")
-
-
-def test_op_04_logout(page_setup: Page):
-    """logout (@click) → no API call"""
-
-    # Step 1: Locate and click the element
-    page_setup.click("button")
-
-    # Step 2: Verify action result
-    page_setup.wait_for_load_state("networkidle")
-
-
-def test_op_05_setLocal(page_setup: Page):
-    """setLocal (@click) → no API call"""
-
-    # Step 1: Locate and click the element
-    page_setup.click("button")
-
-    # Step 2: Verify action result
-    page_setup.wait_for_load_state("networkidle")
-
-
-def test_op_06_getUserInfo(page_setup: Page):
+def test_op_01_getUserInfo(page_setup: Page):
     """getUserInfo (@click) → no API call"""
 
-    # Step 1: Locate and click the element
+    # Step 1: Click the element
     page_setup.click("button")
 
-    # Step 2: Verify action result
+    # Step 2: Verify result
     page_setup.wait_for_load_state("networkidle")
 
 
-def test_op_07_save(page_setup: Page):
-    """save (@click) → no API call"""
+def test_op_02_save(page_setup: Page):
+    """save (@submit) → POST service:EditUserInfo"""
 
-    # Step 1: Locate and click the element
-    page_setup.click("button")
+    # Step 1: Fill form fields
+    page_setup.fill("[v-model='state.nickName']", "test_user")
+    page_setup.fill("[v-model='state.introduceSign']", "test_value")
+    page_setup.fill("[v-model='state.password']", "test_password123")
 
-    # Step 2: Verify action result
+    # Step 2: Submit form with API interception
+    resp_0 = page_setup.expect_response("**/EditUserInfo*")
+    page_setup.click("form/button[type=submit]")
+    response = resp_0.value
+    expect(response).to_be_ok()
+
+    # Step 3: Verify result
     page_setup.wait_for_load_state("networkidle")
 
 
-def test_op_08_handleLogout(page_setup: Page):
-    """handleLogout (@click) → no API call"""
+def test_op_03_handleLogout(page_setup: Page):
+    """handleLogout (@submit) → POST service:logout"""
 
-    # Step 1: Locate and click the element
-    page_setup.click("button")
+    # Step 1: Fill form fields
+    page_setup.fill("[v-model='state.nickName']", "test_user")
+    page_setup.fill("[v-model='state.introduceSign']", "test_value")
+    page_setup.fill("[v-model='state.password']", "test_password123")
 
-    # Step 2: Verify action result
+    # Step 2: Submit form with API interception
+    resp_0 = page_setup.expect_response("**/logout*")
+    page_setup.click("a")
+    response = resp_0.value
+    expect(response).to_be_ok()
+
+    # Step 3: Verify result
     page_setup.wait_for_load_state("networkidle")
-
 
 
 # ── Summary ──
-# Total operations: 8
-#   op_01_md5: md5 (@click) → no API call
-#   op_02_EditUserInfo: EditUserInfo (@click) → no API call
-#   op_03_showSuccessToast: showSuccessToast (@click) → no API call
-#   op_04_logout: logout (@click) → no API call
-#   op_05_setLocal: setLocal (@click) → no API call
-#   op_06_getUserInfo: getUserInfo (@click) → no API call
-#   op_07_save: save (@click) → no API call
-#   op_08_handleLogout: handleLogout (@click) → no API call
+# Total operations: 3
+#   op_01_getUserInfo: getUserInfo (@click) → no API call
+#   op_02_save: save (@submit) → POST service:EditUserInfo
+#   op_03_handleLogout: handleLogout (@submit) → POST service:logout
+# API endpoints: 2
+#   POST service:EditUserInfo
+#   POST service:logout

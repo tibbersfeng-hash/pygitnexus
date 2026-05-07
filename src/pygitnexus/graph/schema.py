@@ -129,6 +129,27 @@ NODE_TABLES = [
         filePath STRING,
         PRIMARY KEY (id)
     )""",
+    """CREATE NODE TABLE TestScript (
+        id STRING,
+        name STRING,
+        pageFile STRING,
+        pageRoute STRING,
+        totalOps INT64,
+        totalFields INT64,
+        totalApis INT64,
+        specJSON STRING,
+        PRIMARY KEY (id)
+    )""",
+    """CREATE NODE TABLE TestOperation (
+        id STRING,
+        opId STRING,
+        opType STRING,
+        handler STRING,
+        element STRING,
+        event STRING,
+        specJSON STRING,
+        PRIMARY KEY (id)
+    )""",
 ]
 
 # Relation types
@@ -138,6 +159,7 @@ REL_TYPES = [
     "HAS_CONSTRUCTOR", "HAS_VARIABLE", "HAS_ANNOTATION",
     "ACCESSES", "USES_ENDPOINT", "EXPOSES",
     "MAPS_TO", "HAS_SETTER", "HAS_GETTER",
+    "GENERATES", "TESTS", "TARGETS", "EXPECTS",
 ]
 
 # Single CodeRelation table with type property
@@ -157,6 +179,7 @@ CREATE REL TABLE CodeRelation (
     FROM File TO TypeAlias,
     FROM File TO Enum,
     FROM File TO API,
+    FROM File TO TestScript,
     FROM Class TO Method,
     FROM Class TO Field,
     FROM Class TO Constructor,
@@ -182,6 +205,10 @@ CREATE REL TABLE CodeRelation (
     FROM Class TO Class,
     FROM Class TO Interface,
     FROM Interface TO Interface,
+    FROM TestScript TO TestOperation,
+    FROM TestScript TO File,
+    FROM TestOperation TO Method,
+    FROM TestOperation TO API,
     type STRING,
     confidence DOUBLE,
     reason STRING,

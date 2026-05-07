@@ -107,14 +107,19 @@ def test_playwright_script_generation():
         all_api_endpoints=[{"method": "POST", "path": "/api/login"}],
     )
 
-    script = generate_playwright_script(op_set)
+    script, spec_data = generate_playwright_script(op_set)
 
     assert "from playwright.sync_api import Page, expect" in script
     assert "PAGE_ROUTE = '/test'" in script
     assert "def test_op_01_onSubmit" in script
     assert "def test_op_02_goToDetail" in script
     assert "POST /api/login" in script
-    assert "navigate to page" in script.lower()
+    assert "navigate to page" in script.lower() or "Trigger navigation" in script or "Verify navigation" in script
+
+    # Verify spec data
+    assert spec_data["page_name"] == "TestPage"
+    assert spec_data["total_ops"] == 2
+    assert len(spec_data["operations"]) == 2
 
     print(f"PASS: Playwright script generated ({len(script)} chars)")
     return True

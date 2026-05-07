@@ -1,6 +1,6 @@
 """Auto-generated Playwright tests for Category"""
 # Source: /tmp/test-projects/newbee-mall-vue3-app/src/views/Category.vue
-# Operations: 8
+# Operations: 6
 
 import re
 import pytest
@@ -16,95 +16,71 @@ def page_setup(page: Page):
     page.wait_for_load_state("networkidle")
     return page
 
-
-def test_op_01_push(page_setup: Page):
-    """push (@click) → no API call"""
-
-    # Step 1: Locate and click the element
-    page_setup.click("button")
-
-    # Step 2: Verify action result
-    page_setup.wait_for_load_state("networkidle")
-
-
-def test_op_02_log(page_setup: Page):
-    """log (@click) → no API call"""
-
-    # Step 1: Locate and click the element
-    page_setup.click("button")
-
-    # Step 2: Verify action result
-    page_setup.wait_for_load_state("networkidle")
-
-
-def test_op_03_showLoadingToast(page_setup: Page):
+def test_op_01_showLoadingToast(page_setup: Page):
     """showLoadingToast (@click) → no API call"""
 
-    # Step 1: Locate and click the element
-    page_setup.click("button")
+    # Step 1: Click the element
+    page_setup.click("a")
 
-    # Step 2: Verify action result
+    # Step 2: Verify result
     page_setup.wait_for_load_state("networkidle")
 
 
-def test_op_04_getCategory(page_setup: Page):
+def test_op_02_getCategory(page_setup: Page):
     """getCategory (@click) → no API call"""
 
-    # Step 1: Locate and click the element
-    page_setup.click("button")
+    # Step 1: Click the element
+    page_setup.click("a")
 
-    # Step 2: Verify action result
+    # Step 2: Verify result
     page_setup.wait_for_load_state("networkidle")
 
 
-def test_op_05_closeToast(page_setup: Page):
+def test_op_03_closeToast(page_setup: Page):
     """closeToast (@click) → no API call"""
 
-    # Step 1: Locate and click the element
-    page_setup.click("button")
+    # Step 1: Click the element
+    page_setup.click("a")
 
-    # Step 2: Verify action result
+    # Step 2: Verify result
     page_setup.wait_for_load_state("networkidle")
 
 
-def test_op_06_goHome(page_setup: Page):
-    """goHome (@click) → no API call"""
+def test_op_04_goHome(page_setup: Page):
+    """goHome (@click) → navigate to another page"""
 
-    # Step 1: Locate and click the element
-    page_setup.click("button")
+    # Step 1: Trigger navigation
+    page_setup.click("a")
 
-    # Step 2: Verify action result
+    # Step 2: Verify navigation target
     page_setup.wait_for_load_state("networkidle")
 
 
-def test_op_07_selectMenu(page_setup: Page):
+def test_op_05_selectMenu(page_setup: Page):
     """selectMenu (@click) → no API call"""
 
-    # Step 1: Locate and click the element
+    # Step 1: Click the element
     page_setup.click("button")
 
-    # Step 2: Verify action result
+    # Step 2: Verify result
     page_setup.wait_for_load_state("networkidle")
 
 
-def test_op_08_selectProduct(page_setup: Page):
-    """selectProduct (@click) → no API call"""
+def test_op_06_selectProduct(page_setup: Page):
+    """selectProduct (@click) → navigate to another page"""
 
-    # Step 1: Locate and click the element
+    # Step 1: Trigger navigation
     page_setup.click("button")
 
-    # Step 2: Verify action result
+    # Step 2: Verify navigation target
     page_setup.wait_for_load_state("networkidle")
-
 
 
 # ── Summary ──
-# Total operations: 8
-#   op_01_push: push (@click) → no API call
-#   op_02_log: log (@click) → no API call
-#   op_03_showLoadingToast: showLoadingToast (@click) → no API call
-#   op_04_getCategory: getCategory (@click) → no API call
-#   op_05_closeToast: closeToast (@click) → no API call
-#   op_06_goHome: goHome (@click) → no API call
-#   op_07_selectMenu: selectMenu (@click) → no API call
-#   op_08_selectProduct: selectProduct (@click) → no API call
+# Total operations: 6
+#   op_01_showLoadingToast: showLoadingToast (@click) → no API call
+#   op_02_getCategory: getCategory (@click) → no API call
+#   op_03_closeToast: closeToast (@click) → no API call
+#   op_04_goHome: goHome (@click) → navigate to another page
+#   op_05_selectMenu: selectMenu (@click) → no API call
+#   op_06_selectProduct: selectProduct (@click) → navigate to another page

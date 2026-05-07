@@ -43,6 +43,7 @@ hiddenimports = [
     "pygitnexus.cli.cypher",
     "pygitnexus.cli.mcp",
     "pygitnexus.cli.setup",
+    "pygitnexus.cli.install",
     "pygitnexus.cli._common",
     # Core
     "pygitnexus.core.pipeline",

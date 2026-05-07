@@ -1,6 +1,6 @@
 """Auto-generated Playwright tests for Swiper"""
 # Source: /tmp/test-projects/newbee-mall-vue3-app/src/components/Swiper.vue
-# Operations: 2
+# Operations: 1
 
 import re
 import pytest
@@ -16,29 +16,16 @@ def page_setup(page: Page):
     page.wait_for_load_state("networkidle")
     return page
 
-
-def test_op_01_open(page_setup: Page):
-    """open (@click) → no API call"""
-
-    # Step 1: Locate and click the element
-    page_setup.click("button")
-
-    # Step 2: Verify action result
-    page_setup.wait_for_load_state("networkidle")
-
-
-def test_op_02_goTo(page_setup: Page):
+def test_op_01_goTo(page_setup: Page):
     """goTo (@click) → no API call"""
 
-    # Step 1: Locate and click the element
-    page_setup.click("button")
+    # Step 1: Click the element
+    page_setup.click("a")
 
-    # Step 2: Verify action result
+    # Step 2: Verify result
     page_setup.wait_for_load_state("networkidle")
-
 
 
 # ── Summary ──
-# Total operations: 2
-#   op_01_open: open (@click) → no API call
-#   op_02_goTo: goTo (@click) → no API call
+# Total operations: 1
+#   op_01_goTo: goTo (@click) → no API call

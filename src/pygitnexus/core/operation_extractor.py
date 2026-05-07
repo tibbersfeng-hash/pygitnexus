@@ -88,6 +88,37 @@ HTML_EVENT_MAP = {
     "onmouseover": "hover",
 }
 
+# JavaScript built-in methods and common library functions that should NOT
+# become standalone operations — they are internal to handler functions.
+BUILTIN_JS_NAMES = frozenset({
+    # Array methods
+    "map", "filter", "forEach", "reduce", "find", "findIndex", "some", "every",
+    "flatMap", "concat", "slice", "splice", "push", "pop", "shift", "unshift",
+    "sort", "reverse", "join", "includes", "indexOf", "lastIndexOf", "entries",
+    "keys", "values", "copyWithin", "fill", "flat",
+    # String methods
+    "toLowerCase", "toUpperCase", "trim", "split", "replace", "match",
+    "substring", "substr", "charAt", "startsWith", "endsWith",
+    "padStart", "padEnd", "repeat",
+    # Object methods
+    "assign", "keys", "values", "entries", "freeze", "seal",
+    # Number / Math
+    "parseInt", "parseFloat", "floor", "ceil", "round", "abs", "max", "min",
+    # Timing
+    "setTimeout", "setInterval", "clearTimeout", "clearInterval",
+    # JSON
+    "stringify", "parse",
+    # Promise / async
+    "then", "catch", "finally",
+    # DOM / browser
+    "getElementById", "querySelector", "querySelectorAll", "addEventListener",
+    "preventDefault", "stopPropagation",
+    # Console
+    "log", "warn", "error", "info", "debug",
+    # Common crypto / hash (often imported as bare names)
+    "md5", "sha1", "sha256", "hash",
+})
+
 
 def extract_all_operations(parse_results: list[ParsedFile]) -> list[PageOperationSet]:
     """Extract operation sets from all parsed frontend files."""
@@ -107,9 +138,16 @@ def _is_frontend_file(file_path: str) -> bool:
 
 
 def _extract_from_parsed(parsed: ParsedFile) -> PageOperationSet:
-    """Extract operation set from a single parsed frontend file."""
+    """Extract operation set from a single parsed frontend file.
+
+    Strategy:
+    1. Template event bindings (caller_method == file_name) are entry-point handlers
+    2. Script-body calls (caller_method == handler_name) are internal to each handler
+    3. API calls inside handler bodies are associated with the handler operation
+    """
     page_name = Path(parsed.file_path).stem
     page_route = _infer_route(parsed.file_path, page_name)
+    file_name = Path(parsed.file_path).name  # e.g. "Login.vue"
 
     op_set = PageOperationSet(
         page_file=parsed.file_path,
@@ -127,10 +165,9 @@ def _extract_from_parsed(parsed: ParsedFile) -> PageOperationSet:
     # Also extract v-model bindings and form fields from source directly
     _extract_vue_fields_from_source(parsed, op_set)
 
-    # Extract operations from CallSites and synthetic methods
-    op_counter = [0]
-
-    # Filter out framework internals before building operations
+    # ── Step 1: Identify template-bound event handlers ──
+    # These are calls where caller_method == file_name (e.g., "Login.vue").
+    # They represent @click, @submit, etc. in the template.
     framework_names = {
         "ref", "reactive", "computed", "watch", "watchEffect", "toRef", "toRefs",
         "onMounted", "onUnmounted", "onBeforeMount", "onUpdated", "onBeforeUpdate",
@@ -142,86 +179,207 @@ def _extract_from_parsed(parsed: ParsedFile) -> PageOperationSet:
         "$nextTick",
     }
 
-    handler_map: dict[str, list[CallSite]] = {}
-    for call in parsed.calls:
-        if call.target_name and not call.target_name.startswith("/*"):
-            target = call.target_name.split(".")[0]  # Get base name for filtering
-            if target in framework_names:
-                continue
-            key = call.target_name or "unknown"
-            handler_map.setdefault(key, []).append(call)
+    # Collect service function imports (from @/service/ or /api/ paths)
+    # These are API wrapper functions that should be recognized as API calls.
+    service_functions: set[str] = set()
+    for imp in parsed.imports:
+        qual = imp.qualified_name.lower()
+        if "/service/" in qual or "/api/" in qual:
+            # The imported name is the last part of the qualified name
+            name = imp.qualified_name.rsplit(".", 1)[-1]
+            service_functions.add(name)
 
-    for handler_name, calls in handler_map.items():
-        op = _build_operation(handler_name, calls, parsed, page_route, op_counter)
+    # Map: handler_name -> {event, op_type, element, line}
+    handler_info: dict[str, dict] = {}
+
+    for call in parsed.calls:
+        if call.caller_method != file_name:
+            continue
+        handler = (call.target_name or "").split(".")[0]
+        if not handler or handler in framework_names or handler in BUILTIN_JS_NAMES:
+            continue
+
+        # Skip v-model data bindings (e.g., "state.verify") — these are not event handlers
+        if "." in (call.target_name or ""):
+            continue
+
+        # Skip component references (e.g., "Login.vue" → component)
+        if handler.endswith(".vue"):
+            op_set.components.append(handler)
+            continue
+
+        # Determine operation type and element from the event context
+        op_type, event_attr = _infer_op_type_from_context(call)
+        element = _infer_element_from_context(handler, parsed)
+
+        if handler not in handler_info:
+            # If the call itself has HTTP info, use it as an API call for this handler
+            initial_api: list[dict] = []
+            if call.http_method and call.http_path:
+                initial_api.append({"method": call.http_method, "path": call.http_path})
+            handler_info[handler] = {
+                "event": event_attr,
+                "op_type": op_type,
+                "element": element,
+                "line": call.line,
+                "initial_api": initial_api,
+            }
+        else:
+            # Merge API calls if multiple calls map to same handler
+            if call.http_method and call.http_path:
+                existing_apis = handler_info[handler].get("initial_api", [])
+                new_api = {"method": call.http_method, "path": call.http_path}
+                if new_api not in existing_apis:
+                    existing_apis.append(new_api)
+
+    # ── Step 2: For each handler, find API calls inside its body ──
+    op_counter = [0]
+
+    for handler_name, info in handler_info.items():
+        # Find all calls where caller_method == handler_name (script body calls)
+        body_calls = [
+            c for c in parsed.calls
+            if c.caller_method == handler_name
+            # Also include calls where caller_method is a method that this handler calls
+            # (transitive — we handle 1-level depth)
+        ]
+
+        # Also gather transitive calls: if handler A calls function B,
+        # include calls where caller_method == B
+        transitive_targets: set[str] = {handler_name}
+        for c in parsed.calls:
+            if c.caller_method == handler_name:
+                target = (c.target_name or "").split(".")[0]
+                if target and target not in framework_names and target not in BUILTIN_JS_NAMES:
+                    transitive_targets.add(target)
+
+        # Expand body_calls to include transitive
+        all_body_calls = [
+            c for c in parsed.calls
+            if c.caller_method in transitive_targets
+        ]
+
+        # Extract API calls from body
+        api_calls = []
+        seen_api: set[tuple[str, str]] = set()
+
+        # Include initial API calls from the template binding itself (e.g., form action)
+        for api in info.get("initial_api", []):
+            key = (api["method"], api["path"])
+            if key not in seen_api:
+                seen_api.add(key)
+                api_calls.append(api)
+
+        for c in all_body_calls:
+            # Direct HTTP calls (fetch, axios, etc.)
+            if c.http_method and c.http_path:
+                key = (c.http_method, c.http_path)
+                if key not in seen_api:
+                    seen_api.add(key)
+                    api_calls.append({
+                        "method": c.http_method,
+                        "path": c.http_path,
+                    })
+            # Indirect API calls: functions imported from service/api modules
+            elif c.target_name and c.target_name in service_functions:
+                # Infer method from function name patterns
+                method = "POST"  # default for service calls
+                key = ("SERVICE", c.target_name)
+                if key not in seen_api:
+                    seen_api.add(key)
+                    api_calls.append({
+                        "method": method,
+                        "path": f"service:{c.target_name}",
+                    })
+
+        # Build the operation
+        op = _build_enhanced_operation(
+            handler_name=handler_name,
+            info=info,
+            api_calls=api_calls,
+            page_route=page_route,
+            parsed=parsed,
+            counter=op_counter,
+        )
         if op:
             op_set.operations.append(op)
 
     # Also extract navigation operations from script content
     _extract_navigation_ops(parsed, op_set, op_counter, page_route)
 
-    # Collect unique API endpoints
+    # Collect unique API endpoints from all operations
     seen_apis: set[tuple[str, str]] = set()
-    for call in parsed.calls:
-        if call.http_method and call.http_path:
-            key = (call.http_method, call.http_path)
+    for op in op_set.operations:
+        for api in op.api_calls:
+            key = (api["method"], api["path"])
             if key not in seen_apis:
                 seen_apis.add(key)
-                op_set.all_api_endpoints.append({
-                    "method": call.http_method,
-                    "path": call.http_path,
-                })
-
-    # Collect component references
-    for call in parsed.calls:
-        if call.target_name and call.target_name.endswith(".vue"):
-            op_set.components.append(call.target_name)
+                op_set.all_api_endpoints.append(api)
 
     return op_set
 
 
-def _build_operation(
+def _infer_op_type_from_context(call: CallSite) -> tuple[str, str]:
+    """Infer operation type and event attribute from call context."""
+    # Check if there's any HTTP method info on the call itself
+    if call.http_method:
+        if call.http_method in ("POST", "PUT", "DELETE", "PATCH"):
+            return "submit", "@submit"
+        else:
+            return "click", "@click"
+
+    # Default: click event
+    return "click", "@click"
+
+
+def _build_enhanced_operation(
     handler_name: str,
-    calls: list[CallSite],
-    parsed: ParsedFile,
+    info: dict,
+    api_calls: list[dict],
     page_route: str,
+    parsed: ParsedFile,
     counter: list[int],
 ) -> PageOperation | None:
-    """Build a PageOperation from a handler and its associated calls."""
+    """Build a PageOperation from handler info and body API calls."""
     counter[0] += 1
     op_id = f"op_{counter[0]:02d}_{handler_name}"
 
-    # Determine operation type
-    op_type = "click"
-    event = "@click"
-    element = "button"
-    line = calls[0].line if calls else 0
+    op_type = info["op_type"]
+    event = info["event"]
+    element = info["element"]
+    line = info["line"]
 
-    for call in calls:
-        if call.http_method:
-            op_type = "submit" if call.http_method in ("POST", "PUT", "DELETE") else "click"
-            event = "@submit" if call.http_method == "POST" else "@click"
-            break
+    # If there are API calls, refine the operation type
+    if api_calls and op_type == "click":
+        has_post = any(c["method"] in ("POST", "PUT", "DELETE", "PATCH") for c in api_calls)
+        if has_post:
+            op_type = "submit"
+            event = "@submit"
 
-    # Determine element from handler context
-    first_call = calls[0] if calls else None
-    if first_call:
-        # Try to find element info from the call's context
-        element = _infer_element_from_call(first_call)
-
-    # Collect API calls
-    api_calls = []
-    for call in calls:
-        if call.http_method and call.http_path:
-            api_calls.append({
-                "method": call.http_method,
-                "path": call.http_path,
-            })
-
-    # Find associated fields
-    fields = []
-    if op_type == "submit":
-        # For submit operations, all form fields on the page are associated
-        fields = []  # Will be populated separately
+    # Check if handler does navigation (router.push, location.href, etc.)
+    body_calls = [c for c in parsed.calls if c.caller_method == handler_name]
+    for c in body_calls:
+        target = (c.target_name or "").lower()
+        if "push" in target or "replace" in target or "location" in target:
+            # If this handler navigates and has no API calls, mark as navigation
+            if not api_calls:
+                nav_path = c.http_path or ""
+                # Try to extract path from target_name patterns
+                op = PageOperation(
+                    op_id=op_id,
+                    op_type="navigation",
+                    element=element,
+                    event="navigation",
+                    handler=handler_name,
+                    handler_line=line,
+                    fields=[],
+                    api_calls=[],
+                    navigation_target=nav_path,
+                    description=f"{handler_name} ({event}) → navigate to {nav_path or 'another page'}",
+                    file_path=parsed.file_path,
+                    line=line,
+                )
+                return op
 
     # Build description
     api_desc = ", ".join(f"{c['method']} {c['path']}" for c in api_calls) if api_calls else "no API call"
@@ -233,8 +391,8 @@ def _build_operation(
         element=element,
         event=event,
         handler=handler_name,
-        handler_line=first_call.line if first_call else 0,
-        fields=fields,
+        handler_line=line,
+        fields=[],
         api_calls=api_calls,
         navigation_target="",
         description=description,
@@ -243,14 +401,47 @@ def _build_operation(
     )
 
 
+def _infer_element_from_context(handler_name: str, parsed: ParsedFile) -> str:
+    """Infer the element type from handler body and name patterns."""
+    body_calls = [c for c in parsed.calls if c.caller_method == handler_name]
+
+    # Check for API call patterns
+    for c in body_calls:
+        if c.http_method == "POST":
+            return "form/button[type=submit]"
+        if c.http_method == "GET":
+            return "link/a"
+
+    # Check name patterns
+    lower = handler_name.lower()
+    if "submit" in lower or "save" in lower or "login" in lower or "register" in lower:
+        return "form/button[type=submit]"
+    if "nav" in lower or "go" in lower or "back" in lower or "to" in lower:
+        return "link/a"
+    if "toggle" in lower or "switch" in lower:
+        return "button/switch"
+    if "delete" in lower or "remove" in lower:
+        return "button.danger"
+    if "edit" in lower or "update" in lower:
+        return "button.edit"
+
+    return "button"
+
+
 def _extract_navigation_ops(
     parsed: ParsedFile,
     op_set: PageOperationSet,
     counter: list[int],
     page_route: str,
 ) -> None:
-    """Extract navigation operations (router.push, window.location, etc.)."""
+    """Extract navigation operations (router.push, window.location, etc.) that are
+    not already captured as template-bound handlers."""
+    existing_handlers = {op.handler for op in op_set.operations}
+
     for call in parsed.calls:
+        # Skip calls that are already captured as template-bound handlers
+        if call.caller_method in existing_handlers:
+            continue
         target = call.target_name or ""
         if "location" in target.lower() or "router" in target.lower() or "push" in target.lower() or "replace" in target.lower():
             if call.http_path:
@@ -314,16 +505,6 @@ def _parse_form_field_method(method: MethodDef) -> PageField | None:
         line=method.start_line,
         selector=selector,
     )
-
-
-def _infer_element_from_call(call: CallSite) -> str:
-    """Infer the element type from a CallSite."""
-    if call.http_method:
-        if call.http_method == "POST":
-            return "form/button[type=submit]"
-        elif call.http_method == "GET":
-            return "link/a"
-    return "button"
 
 
 def _infer_route(file_path: str, page_name: str) -> str:
@@ -508,6 +689,10 @@ def _extract_ops_regex_pass(source: str, file_path: str, parsed: ParsedFile) -> 
             # Extract handler name from expression
             fn_match = re.search(r'\b([a-zA-Z_$][\w$]*)\s*\(', handler)
             handler_name = fn_match.group(1) if fn_match else handler
+
+            # Skip JS built-ins and framework internals
+            if handler_name in BUILTIN_JS_NAMES:
+                continue
 
             parsed.calls.append(CallSite(
                 caller_method=file_name,

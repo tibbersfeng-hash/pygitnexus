@@ -1,6 +1,6 @@
 """Auto-generated Playwright tests for testnexus_report"""
 # Source: /tmp/test-projects/newbee-mall-vue3-app/testnexus_report.html
-# Operations: 3
+# Operations: 2
 
 import re
 import pytest
@@ -20,43 +20,27 @@ def page_setup(page: Page):
     page.wait_for_load_state("networkidle")
     return page
 
-
 def test_op_01_toggleModuleDetail(page_setup: Page):
     """toggleModuleDetail (@click) → no API call"""
 
-    # Step 1: Locate and click the element
-    page_setup.click("button")
+    # Step 1: Click the element
+    page_setup.click("a")
 
-    # Step 2: Verify action result
+    # Step 2: Verify result
     page_setup.wait_for_load_state("networkidle")
 
 
-def test_op_02_github.com(page_setup: Page):
-    """github.com (@click) → GET /https://github.com"""
-
-    # Step 1: Locate and click the element
-    page_setup.click("link/a")
-
-    # Step 2: Verify action result
-    # Expected API call: GET /https://github.com
-    page_setup.wait_for_load_state("networkidle")
-
-
-def test_op_03___testPage__(page_setup: Page):
+def test_op_02___testPage__(page_setup: Page):
     """__testPage__ (@click) → no API call"""
 
-    # Step 1: Locate and click the element
+    # Step 1: Click the element
     page_setup.click("button")
 
-    # Step 2: Verify action result
+    # Step 2: Verify result
     page_setup.wait_for_load_state("networkidle")
-
 
 
 # ── Summary ──
-# Total operations: 3
+# Total operations: 2
 #   op_01_toggleModuleDetail: toggleModuleDetail (@click) → no API call
-#   op_02_github.com: github.com (@click) → GET /https://github.com
-#   op_03___testPage__: __testPage__ (@click) → no API call
-# API endpoints: 1
-#   GET /https://github.com
+#   op_02___testPage__: __testPage__ (@click) → no API call

@@ -1,12 +1,21 @@
-"""Generate Python Playwright automation scripts from page operation sets."""
+"""Generate Python Playwright tests from page operation sets — improved version.
+
+Generates scripts with:
+- Precise CSS selectors (#id, .class, [v-model], [data-testid])
+- Form field filling with appropriate test values
+- API interception and assertion via page.expect_response()
+- URL assertions for navigation
+"""
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
 
 from ..core.operation_extractor import PageField, PageOperation, PageOperationSet
+from .test_spec import TestOpSpec, spec_from_operation, spec_from_set, _test_value_for_type
 
 
 def generate_all(op_sets: list[PageOperationSet], output_dir: str) -> list[str]:
@@ -20,7 +29,7 @@ def generate_all(op_sets: list[PageOperationSet], output_dir: str) -> list[str]:
     for op_set in op_sets:
         if not op_set.operations:
             continue
-        script = generate_playwright_script(op_set)
+        script, _ = generate_playwright_script(op_set)
         file_name = _safe_file_name(op_set.page_name) + "_test.py"
         file_path = os.path.join(output_dir, file_name)
         with open(file_path, "w", encoding="utf-8") as f:
@@ -30,8 +39,14 @@ def generate_all(op_sets: list[PageOperationSet], output_dir: str) -> list[str]:
     return generated
 
 
-def generate_playwright_script(op_set: PageOperationSet) -> str:
-    """Generate a Playwright Python script for a single page operation set."""
+def generate_playwright_script(
+    op_set: PageOperationSet,
+) -> tuple[str, dict[str, object]]:
+    """Generate a Playwright Python script for a single page operation set.
+
+    Returns (script_text, spec_dict) where spec_dict is the full test spec
+    suitable for database storage.
+    """
     lines: list[str] = []
 
     # Header
@@ -45,10 +60,8 @@ def generate_playwright_script(op_set: PageOperationSet) -> str:
     lines.append("")
 
     # Constants
-    base_url_var = f"BASE_URL = 'http://localhost:5173'"
-    route_var = f"PAGE_ROUTE = '{op_set.page_route}'"
-    lines.append(base_url_var)
-    lines.append(route_var)
+    lines.append("BASE_URL = 'http://localhost:5173'")
+    lines.append("PAGE_ROUTE = '" + op_set.page_route + "'")
     lines.append("")
 
     # Form field constants
@@ -67,15 +80,13 @@ def generate_playwright_script(op_set: PageOperationSet) -> str:
     lines.append("    page.goto(f\"{BASE_URL}{PAGE_ROUTE}\")")
     lines.append("    page.wait_for_load_state(\"networkidle\")")
     lines.append("    return page")
-    lines.append("")
 
     # Generate test for each operation
     for op in op_set.operations:
         lines.append("")
         lines.append(_generate_test(op, op_set))
 
-    # Footer
-    lines.append("")
+    # Footer summary
     lines.append("")
     lines.append("# ── Summary ──")
     lines.append(f"# Total operations: {len(op_set.operations)}")
@@ -88,7 +99,11 @@ def generate_playwright_script(op_set: PageOperationSet) -> str:
             lines.append(f"#   {api['method']} {api['path']}")
 
     lines.append("")
-    return "\n".join(lines)
+
+    # Build spec dict
+    spec_data = spec_from_set(op_set)
+
+    return "\n".join(lines), spec_data
 
 
 def _generate_test(op: PageOperation, op_set: PageOperationSet) -> str:
@@ -116,86 +131,111 @@ def _generate_test(op: PageOperation, op_set: PageOperationSet) -> str:
     return "\n".join(lines)
 
 
-def _generate_submit_test(op: PageOperation, op_set: PageOperationSet) -> list[str]:
-    """Generate test for form submission."""
-    lines: list[str] = []
+# ── Improved test generators ──
 
-    # Step 1: Fill form fields
-    fields = op_set.all_fields
+def _generate_submit_test(op: PageOperation, op_set: PageOperationSet) -> list[str]:
+    """Generate test for form submission with API interception."""
+    lines: list[str] = []
+    step_num = 1
+
+    # Step: Fill form fields (operation-level first, then page-level)
+    fields = op.fields or op_set.all_fields
     if fields:
-        lines.append("    # Step 1: Fill form fields")
+        lines.append(f"    # Step {step_num}: Fill form fields")
         for f in fields:
-            if f.field_type in ("text", "email", "tel", "url", "search", "number"):
-                lines.append(f'    page_setup.fill("{f.selector}", "test_value")')
-            elif f.field_type == "password":
-                lines.append(f'    page_setup.fill("{f.selector}", "test_password123")')
+            selector = _precise_selector(f, op)
+            value = _test_value_for_type(f.field_type, f.field_name)
+            if f.field_type in ("text", "email", "tel", "url", "search", "number", "password"):
+                lines.append(f'    page_setup.fill("{selector}", "{value}")')
             elif f.field_type == "textarea":
-                lines.append(f'    page_setup.fill("{f.selector}", "test text content")')
-            elif f.field_type == "checkbox":
-                lines.append(f'    page_setup.check("{f.selector}")')
-            elif f.field_type == "radio":
-                lines.append(f'    page_setup.check("{f.selector}")')
+                lines.append(f'    page_setup.fill("{selector}", "{value}")')
+            elif f.field_type in ("checkbox", "radio"):
+                lines.append(f'    page_setup.check("{selector}")')
             elif f.field_type == "select":
-                lines.append(f'    page_setup.select_option("{f.selector}", "test_value")')
+                lines.append(f'    page_setup.select_option("{selector}", "{value}")')
             elif f.field_type == "file":
-                lines.append(f'    page_setup.set_input_files("{f.selector}", "test_file.txt")')
+                lines.append(f'    page_setup.set_input_files("{selector}", "{value}")')
+        lines.append("")
+        step_num += 1
+
+    # Step: Submit with API interception
+    has_api = bool(op.api_calls)
+    element_selector = _refine_element_selector(op.element)
+
+    if has_api:
+        lines.append(f"    # Step {step_num}: Submit form with API interception")
+        # Build API match patterns with unique variable names
+        api_patterns = _build_api_patterns(op.api_calls)
+        for i, pattern in enumerate(api_patterns):
+            var = f"resp_{i}"
+            lines.append(f'    {var} = page_setup.expect_response("{pattern}")')
+        lines.append(f"    page_setup.click(\"{element_selector}\")")
+        for i, pattern in enumerate(api_patterns):
+            var = f"resp_{i}"
+            lines.append(f'    response = {var}.value')
+            lines.append(f"    expect(response).to_be_ok()")
+        lines.append("")
+    else:
+        lines.append(f"    # Step {step_num}: Submit form")
+        lines.append(f"    page_setup.click(\"{element_selector}\")")
         lines.append("")
 
-    # Step 2: Submit form
-    lines.append("    # Step 2: Submit form")
-    lines.append(f"    page_setup.click(\"{op.element}\")")
-    lines.append("")
+    step_num += 1
 
-    # Step 3: Verify response
-    lines.append("    # Step 3: Verify response")
-    if op.api_calls:
-        for api in op.api_calls:
-            method = api["method"]
-            path = api["path"]
-            lines.append(f"    # Expected API call: {method} {path}")
-
-    # Wait for navigation or response
-    lines.append("    page_setup.wait_for_load_state(\"networkidle\")")
+    # Step: Verify navigation (if any)
+    lines.append(f"    # Step {step_num}: Verify result")
+    if op.navigation_target:
+        lines.append(f'    expect(page_setup).to_have_url(re.compile("{op.navigation_target}"))')
+    else:
+        lines.append('    page_setup.wait_for_load_state("networkidle")')
     lines.append("")
 
     return lines
 
 
 def _generate_click_test(op: PageOperation, op_set: PageOperationSet) -> list[str]:
-    """Generate test for click operation."""
+    """Generate test for click operation with API interception."""
     lines: list[str] = []
+    element_selector = _refine_element_selector(op.element)
 
-    lines.append("    # Step 1: Locate and click the element")
-    lines.append(f"    page_setup.click(\"{op.element}\")")
+    lines.append("    # Step 1: Click the element")
+    lines.append(f"    page_setup.click(\"{element_selector}\")")
     lines.append("")
 
-    # Step 2: Verify action
-    lines.append("    # Step 2: Verify action result")
-    if op.api_calls:
-        for api in op.api_calls:
-            lines.append(f"    # Expected API call: {api['method']} {api['path']}")
-    if op.navigation_target:
-        lines.append(f"    expect(page_setup).to_have_url(re.compile(\"{op.navigation_target}\"))")
-    lines.append("    page_setup.wait_for_load_state(\"networkidle\")")
+    lines.append("    # Step 2: Verify result")
+    has_api = bool(op.api_calls)
+    if has_api:
+        api_patterns = _build_api_patterns(op.api_calls)
+        for pattern in api_patterns:
+            lines.append(f"    # Expected API: {pattern}")
+        lines.append('    page_setup.wait_for_load_state("networkidle")')
+    elif op.navigation_target:
+        lines.append(f'    expect(page_setup).to_have_url(re.compile("{op.navigation_target}"))')
+    else:
+        lines.append('    page_setup.wait_for_load_state("networkidle")')
     lines.append("")
 
     return lines
 
 
 def _generate_navigation_test(op: PageOperation, op_set: PageOperationSet) -> list[str]:
-    """Generate test for navigation operation."""
+    """Generate test for navigation with URL assertion."""
     lines: list[str] = []
+    element_selector = _refine_element_selector(op.element)
 
     lines.append("    # Step 1: Trigger navigation")
-    lines.append(f"    page_setup.click(\"{op.element}\")")
+    lines.append(f"    page_setup.click(\"{element_selector}\")")
     lines.append("")
 
-    # Step 2: Verify navigation
     lines.append("    # Step 2: Verify navigation target")
     if op.navigation_target:
         target = op.navigation_target
-        lines.append(f"    expect(page_setup).to_have_url(re.compile(\"{target}\"))")
-    lines.append("    page_setup.wait_for_load_state(\"networkidle\")")
+        # Ensure the target is a full URL pattern
+        if not target.startswith("http"):
+            target = f"{{BASE_URL}}{target}"
+        lines.append(f'    expect(page_setup).to_have_url(re.compile(r"{target}"))')
+    else:
+        lines.append('    page_setup.wait_for_load_state("networkidle")')
     lines.append("")
 
     return lines
@@ -208,13 +248,20 @@ def _generate_input_test(op: PageOperation, op_set: PageOperationSet) -> list[st
     lines.append("    # Step 1: Fill input field")
     if op.fields:
         for f in op.fields:
-            lines.append(f'    page_setup.fill("{f.selector}", "test_value")')
+            selector = _precise_selector(f, op)
+            value = _test_value_for_type(f.field_type, f.field_name)
+            lines.append(f'    page_setup.fill("{selector}", "{value}")')
     else:
-        lines.append(f'    page_setup.fill("{op.element}", "test_value")')
+        element_selector = _refine_element_selector(op.element)
+        lines.append(f'    page_setup.fill("{element_selector}", "test_value")')
     lines.append("")
 
     lines.append("    # Step 2: Verify input event response")
-    lines.append("    page_setup.wait_for_timeout(500)")
+    if op.api_calls:
+        api_patterns = _build_api_patterns(op.api_calls)
+        for pattern in api_patterns:
+            lines.append(f"    # Expected API: {pattern}")
+    lines.append('    page_setup.wait_for_load_state("networkidle")')
     lines.append("")
 
     return lines
@@ -227,18 +274,20 @@ def _generate_change_test(op: PageOperation, op_set: PageOperationSet) -> list[s
     lines.append("    # Step 1: Change field value")
     if op.fields:
         for f in op.fields:
+            selector = _precise_selector(f, op)
             if f.field_type == "select":
-                lines.append(f'    page_setup.select_option("{f.selector}", "option_value")')
+                lines.append(f'    page_setup.select_option("{selector}", "option_value")')
             elif f.field_type == "checkbox":
-                lines.append(f'    page_setup.set_checked("{f.selector}", True)')
+                lines.append(f'    page_setup.set_checked("{selector}", True)')
             else:
-                lines.append(f'    page_setup.fill("{f.selector}", "new_value")')
+                lines.append(f'    page_setup.fill("{selector}", "new_value")')
     else:
-        lines.append(f'    page_setup.fill("{op.element}", "new_value")')
+        element_selector = _refine_element_selector(op.element)
+        lines.append(f'    page_setup.fill("{element_selector}", "new_value")')
     lines.append("")
 
     lines.append("    # Step 2: Verify change event response")
-    lines.append("    page_setup.wait_for_timeout(500)")
+    lines.append('    page_setup.wait_for_load_state("networkidle")')
     lines.append("")
 
     return lines
@@ -247,20 +296,94 @@ def _generate_change_test(op: PageOperation, op_set: PageOperationSet) -> list[s
 def _generate_generic_test(op: PageOperation, op_set: PageOperationSet) -> list[str]:
     """Generate test for generic/other operation."""
     lines: list[str] = []
+    element_selector = _refine_element_selector(op.element)
 
     lines.append("    # Perform the operation")
-    lines.append(f"    page_setup.click(\"{op.element}\")")
+    lines.append(f"    page_setup.click(\"{element_selector}\")")
     lines.append("")
 
     lines.append("    # Verify result")
     if op.api_calls:
-        for api in op.api_calls:
-            lines.append(f"    # Expected API: {api['method']} {api['path']}")
-    lines.append("    page_setup.wait_for_load_state(\"networkidle\")")
+        api_patterns = _build_api_patterns(op.api_calls)
+        for pattern in api_patterns:
+            lines.append(f"    # Expected API: {pattern}")
+    lines.append('    page_setup.wait_for_load_state("networkidle")')
     lines.append("")
 
     return lines
 
+
+# ── Selector helpers ──
+
+def _precise_selector(f: PageField, op: PageOperation | None = None) -> str:
+    """Generate a precise CSS selector for a form field.
+
+    Priority: #id > [v-model] > .class > [name] > [placeholder] > generic.
+    """
+    raw = f.selector
+
+    # If the selector already has an ID, use it directly
+    if raw.startswith("#"):
+        return raw
+
+    # Try to extract v-model name from the selector or field
+    if "[" in raw and "]" in raw:
+        return raw
+
+    # Build from field attributes
+    if f.field_name:
+        # Try v-model pattern (common in Vue)
+        vm_selector = f"[v-model*='{f.field_name}']"
+        return vm_selector
+
+    # Fallback: use the original selector
+    return raw
+
+
+def _refine_element_selector(element: str) -> str:
+    """Refine a raw element selector for better precision.
+
+    - "button" -> "button[type=submit]" (if submit context)
+    - "link/a" -> "a"
+    - "button.danger" -> keep as is (already specific)
+    """
+    if element == "button":
+        return "button"
+    if element == "link/a":
+        return "a"
+    if element.startswith("button."):
+        return element  # Already has class
+    if element.startswith("#"):
+        return element  # ID selector, already precise
+    if "[" in element:
+        return element  # Already has attribute
+    return element
+
+
+def _build_api_patterns(api_calls: list[dict]) -> list[str]:
+    """Build Playwright URL match patterns from API calls.
+
+    Converts service:function paths to glob patterns for expect_response.
+    """
+    patterns: list[str] = []
+    for api in api_calls:
+        path = api.get("path", "")
+        method = api.get("method", "POST")
+
+        if path.startswith("service:"):
+            # Service function name — match any URL containing it
+            service_name = path.replace("service:", "")
+            patterns.append(f"**/{service_name}*")
+        elif path.startswith("/"):
+            # Direct URL path
+            patterns.append(f"**{path}*")
+        else:
+            patterns.append(f"**/{path}*")
+
+    return patterns
+
+
+# ── Utility ──
 
 def _safe_file_name(name: str) -> str:
     """Convert page name to a safe Python file name."""

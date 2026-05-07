@@ -43,7 +43,21 @@
 
 ## 安装
 
-### 方式一：下载预编译二进制文件（推荐）
+### 方式一：一键自动安装（推荐）
+
+```bash
+pygitnexus install                  # 自动检测平台，下载最新版本到 PATH
+pygitnexus install -v v1.0.0        # 安装指定版本
+pygitnexus install -p /usr/local/bin  # 安装到指定目录
+```
+
+自动安装命令会：
+1. 检测当前操作系统和架构（Mac/Linux/Windows）
+2. 从 GitHub Releases 下载对应的预编译二进制文件
+3. 安装到系统 PATH 中第一个可写的目录
+4. 验证安装是否成功
+
+### 方式二：手动下载预编译二进制文件
 
 从 [Releases](https://github.com/tibbersfeng-hash/pygitnexus/releases) 下载对应平台的单文件可执行程序，无需安装 Python。
 
@@ -112,12 +126,37 @@ pygitnexus web
 - 数据库表和字段影响分析
 - 项目分组管理
 
-### 4. MCP 集成
+### 4. MCP / Hooks / Skills 集成
 
 ```bash
-# 一键配置 Cursor / Claude Code / OpenCode / Codex
+# 一键配置 Cursor / Claude Code / CodeBuddy / OpenCode / Codex（向后兼容）
 pygitnexus setup
+
+# ── MCP Server 管理 ──
+pygitnexus setup mcp add context7 --command npx -a -y -a @anthropic-ai/context7 -d "Library docs"
+pygitnexus setup mcp list
+pygitnexus setup mcp remove context7
+pygitnexus setup mcp export --editor cursor   # 导出到指定编辑器
+
+# ── Hook 管理 ──
+pygitnexus setup hook init                      # 生成示例 Hook 配置
+pygitnexus setup hook add SessionStart -c ~/.pygitnexus/hooks/init.py -m startup -t 30
+pygitnexus setup hook list                      # 列出所有 Hook
+pygitnexus setup hook list PreToolUse           # 列出指定事件的 Hook
+pygitnexus setup hook remove PreToolUse -i 0    # 按索引移除 Hook
+
+# ── Skill 管理 ──
+pygitnexus setup skill init pdf-editor -d "Handle PDF operations"
+pygitnexus setup skill list
+pygitnexus setup skill show pdf-editor
+pygitnexus setup skill remove pdf-editor
 ```
+
+| 功能 | 说明 |
+|------|------|
+| MCP | 模型上下文协议 Server 配置，支持 add/list/remove/export |
+| Hook | 7 种事件钩子（SessionStart/End、Pre/PostToolUse、UserPromptSubmit、Stop、PreCompact） |
+| Skill | 模块化能力包，包含 SKILL.md + scripts/references/assets |
 
 ### 5. TestNexus 前端测试
 
@@ -182,7 +221,12 @@ Symbol Search 支持 Group 模式：在搜索框旁的下拉菜单选择一个 G
 | `status` | 当前目录索引状态 | |
 | `clean` | 删除索引 | `clean --all --force` |
 | `mcp` | 启动 MCP Server | 供 AI 编辑器调用 |
-| `setup` | 一键配置 MCP | 自动检测 Cursor / Claude Code / OpenCode / Codex |
+| `setup` | 一键配置 MCP（默认 auto） | `setup mcp add` / `setup hook init` / `setup skill list` |
+| `install` | 自动安装二进制到 PATH | `install` / `install -v v1.0.0` / `install -f` |
+| `setup auto` | 自动检测并配置 MCP | 向后兼容，同旧版 `setup` |
+| `setup mcp` | MCP Server 管理 | add / list / remove / export |
+| `setup hook` | Hook 事件钩子管理 | add / list / remove / init |
+| `setup skill` | Skill 模块化能力包管理 | init / list / remove / show |
 | `web` | 启动 Web Dashboard | `web --host 0.0.0.0 --port 8000` |
 | `group` | 项目分组管理 | `group create <name> --repos r1 r2` |
 

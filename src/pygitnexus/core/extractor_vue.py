@@ -346,7 +346,13 @@ def _extract_template_expr_calls(
                 'continue', 'throw', 'finally', 'with', 'debugger',
                 '$t', '$event',
             }
-            for bare_match in re.finditer(r'\b([a-zA-Z_$][\w$]*)\b', expr):
+
+            # Remove string literals from expr before matching bare identifiers
+            # to avoid treating string arguments like toggle('register') as handler calls
+            expr_no_strings = re.sub(r"'[^']*'", '', expr)
+            expr_no_strings = re.sub(r'"[^"]*"', '', expr_no_strings)
+
+            for bare_match in re.finditer(r'\b([a-zA-Z_$][\w$]*)\b', expr_no_strings):
                 bare_name = bare_match.group(1)
                 if bare_name in skip:
                     continue
