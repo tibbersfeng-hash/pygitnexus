@@ -11,5 +11,5 @@ try:
     from importlib.metadata import version as _pkg_version
     __version__ = _pkg_version("pygitnexus")
 except Exception:
-    # Fallback for frozen builds — updated with each release
-    __version__ = "9.0.0"
+    # Fallback for frozen builds where metadata is unavailable
+    __version__ = "0.0.0"

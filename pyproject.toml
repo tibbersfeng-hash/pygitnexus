@@ -1,6 +1,6 @@
 [project]
 name = "pygitnexus"
-version = "9.0.0"
+version = "0.1.0"
 description = "Java codebase knowledge graph builder + TestNexus testing — Python implementation of GitNexus"
 requires-python = ">=3.12"
 dependencies = [
