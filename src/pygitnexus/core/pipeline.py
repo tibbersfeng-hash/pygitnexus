@@ -460,6 +460,7 @@ def _write_to_graph_batched(
                     http_method, http_path = method_http
                     method_data["httpMethod"] = http_method
                     method_data["httpPath"] = http_path
+                    method_data["httpParams"] = ""
                 else:
                     # Ensure all rows have the same keys for CSV COPY
                     method_data["httpMethod"] = ""

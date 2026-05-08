@@ -28,7 +28,7 @@ class TestMyBatisMapperXml:
         """UserMapper.xml should return a MapperInfo object."""
         info = parse_mapper_xml(FIXTURES / "UserMapper.xml")
         assert info is not None
-        assert info.namespace == "com.example.mapper.UserMapper"
+        assert info.namespace == "com.example.demo.mapper.UserMapper"
 
     def test_result_maps(self):
         """Should extract resultMap definitions."""
@@ -36,7 +36,7 @@ class TestMyBatisMapperXml:
         assert len(info.result_maps) == 1
         rm = info.result_maps[0]
         assert rm.id == "userMap"
-        assert rm.entity_fqn == "com.example.entity.User"
+        assert rm.entity_fqn == "com.example.demo.entity.User"
         prop_names = [p.property for p in rm.properties]
         assert "username" in prop_names
         assert "email" in prop_names

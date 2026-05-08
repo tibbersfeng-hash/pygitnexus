@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
-<mapper namespace="com.example.mapper.UserMapper">
+<mapper namespace="com.example.demo.mapper.UserMapper">
 
-    <resultMap id="userMap" type="com.example.entity.User">
+    <resultMap id="userMap" type="com.example.demo.entity.User">
         <id column="id" property="id" jdbcType="BIGINT"/>
         <result column="username" property="username" jdbcType="VARCHAR"/>
         <result column="email" property="email" jdbcType="VARCHAR"/>
@@ -21,13 +21,18 @@
         WHERE username = #{username}
     </select>
 
-    <insert id="insert" parameterType="com.example.entity.User"
+    <select id="selectAll" resultMap="userMap">
+        SELECT id, username, email, status
+        FROM t_user
+    </select>
+
+    <insert id="insert" parameterType="com.example.demo.entity.User"
             useGeneratedKeys="true" keyProperty="id">
         INSERT INTO t_user (username, email, status)
         VALUES (#{username}, #{email}, #{status})
     </insert>
 
-    <update id="updateStatus" parameterType="com.example.entity.User">
+    <update id="updateStatus" parameterType="com.example.demo.entity.User">
         UPDATE t_user SET status = #{status} WHERE id = #{id}
     </update>
 
