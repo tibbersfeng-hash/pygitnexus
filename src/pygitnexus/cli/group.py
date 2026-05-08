@@ -191,7 +191,7 @@ def group_status(name: str) -> None:
 @click.option("--target", required=True, help="Symbol or file name to analyze")
 @click.option("--repo", required=True, help="Member path from group.yaml (e.g. app/backend)")
 @click.option("--direction", default="upstream", help="upstream or downstream")
-@click.option("--max-depth", default=3, type=int, help="Max graph traversal depth")
+@click.option("--max-depth", default=30, type=int, help="Max graph traversal depth")
 @click.option("--min-confidence", default=0.0, type=float, help="Minimum confidence (0-1)")
 @click.option("--json", "json_output", is_flag=True, help="JSON output")
 def group_impact_cmd(

@@ -32,9 +32,9 @@ def query(store: GraphStore, keyword: str, limit: int = 20) -> list[dict]:
     )
 
 
-def symbol_context(store: GraphStore, name: str) -> dict:
-    """Get full context for a symbol."""
-    return store.symbol_context(name)
+def symbol_context(store: GraphStore, name: str, max_depth: int = 30) -> dict:
+    """Get full context for a symbol with BFS expansion up to max_depth hops."""
+    return store.symbol_context(name, max_depth)
 
 
 def run_cypher(store: GraphStore, cypher: str) -> list[dict]:

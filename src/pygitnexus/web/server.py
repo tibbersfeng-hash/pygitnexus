@@ -970,46 +970,54 @@ async def api_symbol(request: Request) -> JSONResponse:
                 {"method": actual_name, "iface": impl_iface_short},
             )
 
-        # Build callee tree with depth-2 expansion
-        callee_map: dict[str, dict] = []
+        # Build callee tree with BFS expansion up to 30 hops
+        callee_map: list[dict] = []
         seen_callees: set[str] = set()
+        callee_lookup: dict[str, dict] = {}
         for c in (callees or []):
             key = f"{c['calleeClass']}.{c['callee']}"
             if key not in seen_callees:
                 seen_callees.add(key)
-                callee_map.append({"name": key, "via": "CALLS", "confidence": c.get("confidence"), "children": []})
+                node = {"name": key, "via": "CALLS", "confidence": c.get("confidence"), "children": []}
+                callee_map.append(node)
+                callee_lookup[key] = node
         for c in (iface_callees or []):
             key = f"{c['calleeClass']}.{c['callee']}"
             if key not in seen_callees:
                 seen_callees.add(key)
-                callee_map.append({"name": key, "via": "CALLS", "confidence": c.get("confidence"), "children": []})
+                node = {"name": key, "via": "CALLS", "confidence": c.get("confidence"), "children": []}
+                callee_map.append(node)
+                callee_lookup[key] = node
 
-        # Depth-2 expansion: batch query all children of callees
-        if callee_map:
-            callee_keys = [c["name"] for c in callee_map]
+        # BFS expansion up to 30 hops
+        _MAX_CALLEE_DEPTH = 30
+        current_level = [c["name"] for c in callee_map]
+        for _depth in range(2, _MAX_CALLEE_DEPTH + 1):
+            if not current_level:
+                break
             conditions = " OR ".join(
                 f"(source.className = {json.dumps(k.rsplit('.', 1)[0])} AND source.name = {json.dumps(k.rsplit('.', 1)[1])})"
-                for k in callee_keys
+                for k in current_level
             )
-            depth2_rows = store.query(
+            next_level: list[str] = []
+            rows = store.query(
                 f"MATCH (source:Method)-[r:CodeRelation {{type: 'CALLS'}}]->(child:Method) "
                 f"WHERE {conditions} "
                 f"RETURN source.className AS srcClass, source.name AS srcName, "
-                f"       child.name AS childName, child.className AS childClass LIMIT 200"
+                f"       child.name AS childName, child.className AS childClass"
             )
-            callee_lookup = {c["name"]: c for c in callee_map}
-            for r in depth2_rows:
+            for r in rows:
                 parent_key = f"{r['srcClass']}.{r['srcName']}"
                 child_key = f"{r['childClass']}.{r['childName']}"
-                if parent_key in callee_lookup:
-                    if not any(ch["name"] == child_key for ch in callee_lookup[parent_key]["children"]):
-                        callee_lookup[parent_key]["children"].append({
-                            "name": child_key,
-                            "via": "CALLS",
-                            "children": [],
-                        })
+                if parent_key in callee_lookup and child_key not in seen_callees:
+                    seen_callees.add(child_key)
+                    new_node = {"name": child_key, "via": "CALLS", "children": []}
+                    callee_lookup[parent_key]["children"].append(new_node)
+                    callee_lookup[child_key] = new_node
+                    next_level.append(child_key)
+            current_level = next_level
 
-        # Depth-2: expand Mapper → Table by inference (MyBatis mappers have no outgoing CALLS edges)
+        # Expand Mapper → Table by inference (MyBatis mappers have no outgoing CALLS edges)
         for node in callee_map:
             if "Mapper" in node["name"] or "DAO" in node["name"]:
                 parts = node["name"].rsplit(".", 1)
@@ -2106,12 +2114,12 @@ async def api_impact(request: Request) -> JSONResponse:
             # Run BFS in both directions
             upstream = _impact_bfs(
                 store, sym_id, sym_type, "upstream",
-                min(max_depth, 10), rel_types,
+                min(max_depth, 30), rel_types,
                 include_tests=False, min_confidence=0,
             )
             downstream = _impact_bfs(
                 store, sym_id, sym_type, "downstream",
-                min(max_depth, 10), rel_types,
+                min(max_depth, 30), rel_types,
                 include_tests=False, min_confidence=0,
             )
             return _ok({
@@ -2696,7 +2704,8 @@ async def api_mindmap(request: Request) -> JSONResponse:
 
             upstream = list(ctrl_map.values())
 
-        # Downstream: build nested tree with depth-2 expansion
+        # Downstream: build nested tree with BFS expansion up to 30 hops
+        _MAX_DOWNSTREAM_DEPTH = 30
         callees = store.query(
             "MATCH (source:Method)-[r:CodeRelation {type: 'CALLS'}]->(callee:Method) "
             "WHERE source.className = $cls AND source.name = $method "
@@ -2705,50 +2714,55 @@ async def api_mindmap(request: Request) -> JSONResponse:
         )
         downstream: list[dict] = []
         callee_map: dict[str, dict] = {}
+        seen: set[str] = set()
         for c in callees:
             key = f"{c['calleeClass']}.{c['calleeName']}"
-            node: dict[str, Any] = {"name": key, "via": "CALLS", "children": []}
-            callee_map[key] = node
-            downstream.append(node)
+            if key not in seen:
+                seen.add(key)
+                node: dict[str, Any] = {"name": key, "via": "CALLS", "children": []}
+                callee_map[key] = node
+                downstream.append(node)
 
-        # Depth-2 expansion: batch query all children of callees
-        if callee_map:
-            callee_keys = list(callee_map.keys())
-            # Build OR conditions for the batch query
+        # BFS expansion up to 30 hops
+        current_level = list(callee_map.keys())
+        for _depth in range(2, _MAX_DOWNSTREAM_DEPTH + 1):
+            if not current_level:
+                break
+            # Batch query: find all children of current level nodes
             conditions = " OR ".join(
                 f"(source.className = {json.dumps(k.rsplit('.', 1)[0])} AND source.name = {json.dumps(k.rsplit('.', 1)[1])})"
-                for k in callee_keys
+                for k in current_level
             )
-            depth2_rows = store.query(
+            next_level: list[str] = []
+            rows = store.query(
                 f"MATCH (source:Method)-[r:CodeRelation {{type: 'CALLS'}}]->(child:Method) "
                 f"WHERE {conditions} "
                 f"RETURN source.className AS srcClass, source.name AS srcName, "
-                f"       child.name AS childName, child.className AS childClass LIMIT 200"
+                f"       child.name AS childName, child.className AS childClass"
             )
-            for r in depth2_rows:
+            for r in rows:
                 parent_key = f"{r['srcClass']}.{r['srcName']}"
                 child_key = f"{r['childClass']}.{r['childName']}"
-                if parent_key in callee_map:
-                    if not any(ch["name"] == child_key for ch in callee_map[parent_key]["children"]):
-                        callee_map[parent_key]["children"].append({
-                            "name": child_key,
-                            "via": "CALLS",
-                            "children": [],
-                        })
+                if parent_key in callee_map and child_key not in seen:
+                    seen.add(child_key)
+                    new_node: dict[str, Any] = {"name": child_key, "via": "CALLS", "children": []}
+                    callee_map[parent_key]["children"].append(new_node)
+                    callee_map[child_key] = new_node
+                    next_level.append(child_key)
+            current_level = next_level
 
-        # Depth-2: expand Mapper → Table by inference (MyBatis mappers have no outgoing CALLS edges)
+        # Expand Mapper → Table by inference (MyBatis mappers have no outgoing CALLS edges)
         for key, node in callee_map.items():
             if "Mapper" in key or "DAO" in key:
                 parts = key.rsplit(".", 1)
                 if len(parts) == 2:
                     table_name = _infer_table_from_mapper(parts[0], parts[1])
-                    if table_name:
-                        if not any(ch["name"] == table_name for ch in node["children"]):
-                            node["children"].append({
-                                "name": table_name,
-                                "via": "SQL (MyBatis)",
-                                "children": [],
-                            })
+                    if table_name and not any(ch["name"] == table_name for ch in node["children"]):
+                        node["children"].append({
+                            "name": table_name,
+                            "via": "SQL (MyBatis)",
+                            "children": [],
+                        })
 
         return _ok({
             "root": root_label,

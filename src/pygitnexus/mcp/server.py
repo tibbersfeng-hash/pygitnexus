@@ -359,10 +359,11 @@ def create_server() -> FastMCP:
         return _format_results(results)
 
     @mcp.tool()
-    def context(name: str, repo: str | None = None) -> str:
+    def context(name: str, depth: int = 30, repo: str | None = None) -> str:
         """360-degree view of a single code symbol.
 
         Shows callers, callees, and imports related to the symbol.
+        Traverses up to `depth` hops upstream and downstream.
 
         WHEN TO USE: After query() to understand a specific symbol in depth.
         Shows all callers, callees, and what execution flows a symbol participates in.
@@ -370,13 +371,14 @@ def create_server() -> FastMCP:
 
         Args:
             name: Symbol name (e.g., "validateUser", "AuthService")
+            depth: Max BFS traversal depth for callers/callees (default: 30)
             repo: Repository name or path. Omit if only one repo is indexed.
         """
         store, _ = _load_store(repo)
         if store is None:
             return f"Error: No indexed repository found{' for ' + repo if repo else ''}."
         try:
-            ctx = symbol_context(store, name)
+            ctx = symbol_context(store, name, max_depth=max(1, min(30, depth)))
         finally:
             store.close()
 
@@ -427,7 +429,7 @@ def create_server() -> FastMCP:
         direction: str = "upstream",
         file_path: str = "",
         kind: str = "",
-        maxDepth: int = 3,
+        maxDepth: int = 30,
         relationTypes: list[str] | None = None,
         includeTests: bool = False,
         minConfidence: float = 0,
@@ -452,7 +454,7 @@ def create_server() -> FastMCP:
             direction: "upstream" (what depends on this) or "downstream" (what this depends on)
             file_path: File path hint to disambiguate common names
             kind: Kind filter to disambiguate (e.g. "Class", "Method")
-            maxDepth: Max relationship depth (default: 3, range 1-32)
+            maxDepth: Max relationship depth (default: 30, range 1-30)
             relationTypes: Filter: CALLS, IMPORTS, EXTENDS, IMPLEMENTS, HAS_METHOD, HAS_PROPERTY, ACCESSES
             includeTests: Include test files (default: false)
             minConfidence: Minimum edge confidence 0-1 (default: 0)
@@ -462,7 +464,7 @@ def create_server() -> FastMCP:
         if store is None:
             return f"Error: No indexed repository found{' for ' + repo if repo else ''}."
 
-        max_depth = max(1, min(32, maxDepth))
+        max_depth = max(1, min(30, maxDepth))
         rel_types = relation_types or _DEFAULT_REL_TYPES
         rel_types = [t for t in rel_types if t in _VALID_REL_TYPES]
         if not rel_types:

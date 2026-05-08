@@ -149,7 +149,7 @@ def group_impact(
     target: str,
     db_path: str | Path,
     direction: str = "upstream",
-    max_depth: int = 3,
+    max_depth: int = 30,
     min_confidence: float = 0,
     include_tests: bool = False,
     relation_types: list[str] | None = None,
