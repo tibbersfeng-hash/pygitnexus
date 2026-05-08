@@ -1,21 +1,33 @@
 #!/usr/bin/env bash
 # Cross-platform CLI smoke test for PyGitNexus CI
 # Called from: .github/workflows/build.yml
+# Usage: test_cli.sh [binary_path] [tag_version]
 # All commands run with error suppression — this is a smoke test, not strict validation.
 
 set +e
 
+# Accept binary path as first argument (defaults to dist/pygitnexus)
+BINARY="${1:-dist/pygitnexus}"
+
 # Detect platform and set binary extension
 OS_NAME="$(uname -s)"
+if [[ "$OS_NAME" == MINGW* ]] || [[ "$OS_NAME" == MSYS* ]]; then
+    # If binary doesn't already have .exe, add it
+    case "$BINARY" in
+        *.exe) ;;
+        *) BINARY="${BINARY}.exe" ;;
+    esac
+fi
+
+TEST_DIR="tests/fixtures/simple"
+TAG_MAJOR="${2:-${GITHUB_REF_NAME#v}}"
+
+# Extension for temp binaries created during install tests
 if [[ "$OS_NAME" == MINGW* ]] || [[ "$OS_NAME" == MSYS* ]]; then
     EXT=".exe"
 else
     EXT=""
 fi
-
-BINARY="dist/pygitnexus${EXT}"
-TEST_DIR="tests/fixtures/simple"
-TAG_MAJOR="${GITHUB_REF_NAME#v}"
 
 echo "=== pygitnexus CLI Smoke Test ==="
 echo "Platform: $OS_NAME"

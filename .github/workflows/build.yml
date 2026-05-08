@@ -45,58 +45,72 @@ jobs:
           TAG="${GITHUB_REF_NAME#v}"
           python3 -c "import re; t=open('pyproject.toml').read(); t=re.sub(r'^version = .*', f'version = \"${TAG}.0.0\"', t, 1, re.M); open('pyproject.toml','w').write(t); print(f'Updated version to ${TAG}.0.0')"
 
+      - name: Write VERSION file for frozen builds
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "${TAG}.0.0" > src/pygitnexus/VERSION
+
       - name: Install dependencies
         run: |
           uv sync --group build
 
-      - name: Build with PyInstaller
+      - name: Build onefile binary
         shell: bash
         run: |
-          uv run pyinstaller pygitnexus.spec
+          PYINSTALLER_MODE=onefile uv run pyinstaller pygitnexus.spec
 
-      - name: Test all CLI commands
+      - name: Test onefile binary
         shell: bash
-        run: bash .github/scripts/test_cli.sh
+        run: bash .github/scripts/test_cli.sh dist/pygitnexus
 
+      - name: Build onedir bundle
+        shell: bash
+        run: |
+          rm -rf dist/pygitnexus build/pygitnexus
+          PYINSTALLER_MODE=onedir uv run pyinstaller pygitnexus.spec
 
-      - name: Prepare artifact
+      - name: Prepare artifacts
         shell: bash
         run: |
           VERSION="${{ github.ref_name || 'dev' }}"
-          EXT=""
-          [ "${{ matrix.os }}" = "windows" ] && EXT=".exe"
+          OS="${{ matrix.os }}"
+          ARCH="${{ matrix.arch }}"
           OUTDIR="release-artifacts"
+          EXT=""
+          [ "$OS" = "windows" ] && EXT=".exe"
           mkdir -p "$OUTDIR"
-          cp "dist/pygitnexus${EXT}" "$OUTDIR/pygitnexus-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}${EXT}"
 
-      - name: Upload artifact
+          # onefile binary
+          cp "dist/pygitnexus${EXT}" "$OUTDIR/pygitnexus-${VERSION}-${OS}-${ARCH}${EXT}"
+
+          # onedir bundle (tar.gz / zip)
+          if [ "$OS" = "windows" ]; then
+            powershell -Command "Compress-Archive -Path dist/pygitnexus -DestinationPath $OUTDIR/pygitnexus-${VERSION}-${OS}-${ARCH}-onedir.zip"
+          else
+            tar -czf "$OUTDIR/pygitnexus-${VERSION}-${OS}-${ARCH}-onedir.tar.gz" -C dist pygitnexus
+          fi
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: pygitnexus-${{ matrix.os }}-${{ matrix.arch }}
           path: release-artifacts/
           if-no-files-found: error
 
-      - name: Create release
-        if: startsWith(github.ref, 'refs/tags/') && matrix.os == 'linux' && matrix.arch == 'x86_64'
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+      - name: Create release with all artifacts
         uses: softprops/action-gh-release@v2
         with:
-          files: release-artifacts/*
+          files: |
+            **/pygitnexus-*
           draft: false
           prerelease: false
           generate_release_notes: true
-
-  checksums:
-    name: Generate checksums
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.event_name == 'release'
-    steps:
-      - uses: actions/download-artifact@v4
-      - name: Generate SHA256
-        run: |
-          mkdir -p checksums
-          find . -type f -name 'pygitnexus-*' -exec sh -c 'sha256sum "$1" >> checksums/SHA256SUMS.txt' _ {} \;
-      - name: Upload checksums to release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: checksums/SHA256SUMS.txt

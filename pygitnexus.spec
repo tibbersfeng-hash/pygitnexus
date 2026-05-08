@@ -2,9 +2,11 @@
 """PyInstaller spec for PyGitNexus.
 
 Usage:
-    pyinstaller pygitnexus.spec
+    pyinstaller pygitnexus.spec              # onefile mode (default)
+    PYINSTALLER_MODE=onedir pyinstaller pygitnexus.spec  # onedir mode
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -84,14 +86,19 @@ hiddenimports = [
 ]
 
 # Data files: tree-sitter grammars + kuzu native libs + web assets
+datas = []
+
+# VERSION file for frozen builds (written by CI before building)
+version_file = Path("src/pygitnexus/VERSION")
+if version_file.exists():
+    datas.append((str(version_file), "pygitnexus"))
+
 web_dir = Path("src/pygitnexus/web")
-datas = [
-    (str(web_dir), "pygitnexus/web"),
-    (str(tshtml_dir), "tree_sitter_html"),
-    (str(tsjava_dir), "tree_sitter_java"),
-    (str(tsjs_dir), "tree_sitter_javascript"),
-    (str(tsts_dir), "tree_sitter_typescript"),
-]
+datas.append((str(web_dir), "pygitnexus/web"))
+datas.append((str(tshtml_dir), "tree_sitter_html"))
+datas.append((str(tsjava_dir), "tree_sitter_java"))
+datas.append((str(tsjs_dir), "tree_sitter_javascript"))
+datas.append((str(tsts_dir), "tree_sitter_typescript"))
 
 # Kuzu native libs vary by platform
 for ext in ("*.so", "*.dylib", "*.dll", "*.pyd"):
@@ -114,23 +121,46 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
-    name="pygitnexus",
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
-    console=True,
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-)
+build_mode = os.environ.get("PYINSTALLER_MODE", "onefile")
+
+if build_mode == "onedir":
+    # --- onedir mode: no extraction at runtime ---
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name="pygitnexus",
+        debug=False,
+        strip=False,
+        upx=True,
+        console=True,
+    )
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.datas,
+        name="pygitnexus",
+    )
+else:
+    # --- onefile mode (default, for GitHub Releases) ---
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.datas,
+        [],
+        name="pygitnexus",
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=True,
+        upx_exclude=[],
+        runtime_tmpdir=None,
+        console=True,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+    )
