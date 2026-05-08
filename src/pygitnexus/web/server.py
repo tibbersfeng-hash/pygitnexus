@@ -2465,6 +2465,8 @@ async def api_mindmap(request: Request) -> JSONResponse:
                         if svc_key not in seen_services:
                             seen_services.add(svc_key)
                             svc_node = {"name": svc_key, "via": "CALLS", "children": []}
+                            if _is_accessor(sc['callerName']):
+                                svc_node["is_accessor"] = True
 
                             # If ServiceImpl implements an Interface, query callers of the Interface method
                             iface_name = None
@@ -2772,6 +2774,8 @@ async def api_mindmap(request: Request) -> JSONResponse:
                                 # Already seen, but add a labeled copy to tree if path differs
                                 if path_label:
                                     ctrl_node = {"name": display_name, "via": "CALLS", "children": []}
+                                    if _is_accessor(cr['callerName']):
+                                        ctrl_node["is_accessor"] = True
                                     # Find matching parent nodes and attach
                                     for svc_k, svc_node in _upstream_nodes.items():
                                         if svc_node:
@@ -2781,6 +2785,8 @@ async def api_mindmap(request: Request) -> JSONResponse:
                                 continue
                             _seen_upstream.add(ctrl_key)
                             ctrl_node = {"name": display_name, "via": "CALLS", "children": []}
+                            if _is_accessor(cr['callerName']):
+                                ctrl_node["is_accessor"] = True
 
                             # Find USES_ENDPOINT pages for this Controller
                             page_rows = store.query(
@@ -2840,6 +2846,8 @@ async def api_mindmap(request: Request) -> JSONResponse:
                         if svc_key not in seen_services:
                             seen_services.add(svc_key)
                             svc_node = {"name": svc_key, "via": "CALLS", "children": []}
+                            if _is_accessor(sc['callerName']):
+                                svc_node["is_accessor"] = True
 
                             # If ServiceImpl implements an Interface, query callers of the Interface method
                             iface_name = None
@@ -2902,6 +2910,19 @@ async def api_mindmap(request: Request) -> JSONResponse:
         # Controller → Interface.method → Impl.method → Impl's callees → ...
         _MAX_DOWNSTREAM_DEPTH = 30
 
+        def _is_accessor(method_name: str) -> bool:
+            """Check if a method is a getter/setter (pure field access, no business logic)."""
+            mn = method_name
+            for prefix in ("get", "set", "is"):
+                if mn.startswith(prefix) and len(mn) > len(prefix):
+                    rest = mn[len(prefix):]
+                    # Pure accessor: short name (≤25 chars total) starting with uppercase
+                    # e.g., getName, getGoodsName, getCategoryId, setGoodsIntro, isDeleted
+                    # vs getCarouselsForIndex (30 chars, business method)
+                    if rest and rest[0].isupper() and len(mn) <= 16:
+                        return True
+            return False
+
         # Step 1: Query direct callees (these are Interface methods when source is a Controller)
         direct_callees = store.query(
             "MATCH (source:Method)-[r:CodeRelation {type: 'CALLS'}]->(callee:Method) "
@@ -2949,7 +2970,10 @@ async def api_mindmap(request: Request) -> JSONResponse:
             key = f"{c['calleeClass']}.{c['calleeName']}"
             if key not in seen:
                 seen.add(key)
+                method_part = key.rsplit('.', 1)[1]
                 node: dict[str, Any] = {"name": key, "via": "CALLS", "children": []}
+                if _is_accessor(method_part):
+                    node["is_accessor"] = True
                 callee_map[key] = node
                 downstream.append(node)
 
@@ -2969,6 +2993,8 @@ async def api_mindmap(request: Request) -> JSONResponse:
                     if cc_key not in seen:
                         seen.add(cc_key)
                         cc_node: dict[str, Any] = {"name": cc_key, "via": "CALLS", "children": []}
+                        if _is_accessor(cc_key.rsplit('.', 1)[1]):
+                            cc_node["is_accessor"] = True
                         callee_map[impl_key]["children"].append(cc_node)
                         callee_map[cc_key] = cc_node
 
@@ -3016,6 +3042,8 @@ async def api_mindmap(request: Request) -> JSONResponse:
                     if src_key in callee_map and child_key not in seen:
                         seen.add(child_key)
                         new_node: dict[str, Any] = {"name": child_key, "via": "CALLS", "children": []}
+                        if _is_accessor(child_key.rsplit('.', 1)[1]):
+                            new_node["is_accessor"] = True
                         callee_map[src_key]["children"].append(new_node)
                         callee_map[child_key] = new_node
 
@@ -3079,6 +3107,8 @@ async def api_mindmap(request: Request) -> JSONResponse:
                         if cc_key not in seen:
                             seen.add(cc_key)
                             cc_node: dict[str, Any] = {"name": cc_key, "via": "CALLS", "children": []}
+                            if _is_accessor(cc_key.rsplit('.', 1)[1]):
+                                cc_node["is_accessor"] = True
                             impl_node["children"].append(cc_node)
                             callee_map[cc_key] = cc_node
 

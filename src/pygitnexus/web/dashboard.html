@@ -1169,6 +1169,10 @@ async function showSymbolDetail(fullName, shortName, repo) {
         <div class="mindmap-title-bar">
           <span class="mindmap-title">Call Chain Mindmap</span>
           <div style="display:flex;align-items:center;gap:8px">
+            <label style="font-size:12px;color:var(--text2);cursor:pointer;display:flex;align-items:center;gap:4px;user-select:none">
+              <input type="checkbox" id="${mindmapUid}-hide-accessor" checked onchange="toggleAccessorVisibility('${mindmapUid}')" style="accent-color:var(--accent)" />
+              隐藏 getter/setter
+            </label>
             <span style="font-size:11px;color:var(--text2)">滚轮缩放 · 拖拽平移 · 双击节点复制名称</span>
             <button class="mindmap-fullscreen-btn" onclick="openMindmapFullscreen('${mindmapUid}')">⛶ 全屏</button>
           </div>
@@ -1211,10 +1215,19 @@ function renderMindmapPanels(uid) {
   const container = document.getElementById(uid);
   if (!container) return;
 
+  // Check if accessor hiding is enabled
+  const hideAccessors = (() => {
+    const cb = document.getElementById(`${uid}-hide-accessor`);
+    return cb ? cb.checked : true;
+  })();
+
   // Build nested tree for downstream (recursive, with colors)
   function buildTree(items) {
     if (!items || !items.length) return [];
-    return items.map(item => {
+    const result = [];
+    for (const item of items) {
+      // Skip accessor nodes when hiding is enabled
+      if (hideAccessors && item.is_accessor) continue;
       let color;
       if (item.is_api) {
         color = { color: '#f59e0b', borderColor: '#fbbf24' };
@@ -1223,20 +1236,24 @@ function renderMindmapPanels(uid) {
       } else {
         color = { color: '#10b981', borderColor: '#34d399' };
       }
-      return {
+      result.push({
         name: item.name,
         via: item.via,
         is_api: item.is_api,
         itemStyle: color,
         children: item.children && item.children.length ? buildTree(item.children) : [],
-      };
-    });
+      });
+    }
+    return result;
   }
 
   // Build upstream tree from API data (page → Controller → target)
   function buildUpstreamTree(items) {
     if (!items || !items.length) return [];
-    return items.map(item => {
+    const result = [];
+    for (const item of items) {
+      // Skip accessor nodes when hiding is enabled
+      if (hideAccessors && item.is_accessor) continue;
       let color;
       if (item.is_api) {
         color = { color: '#f59e0b', borderColor: '#fbbf24' };
@@ -1247,14 +1264,15 @@ function renderMindmapPanels(uid) {
       } else {
         color = { color: '#0ea5e9', borderColor: '#38bdf8' };
       }
-      return {
+      result.push({
         name: item.name,
         via: item.via,
         is_api: item.is_api,
         itemStyle: color,
         children: item.children && item.children.length ? buildUpstreamTree(item.children) : [],
-      };
-    });
+      });
+    }
+    return result;
   }
 
   const hasUpstream = data.upstream && data.upstream.length > 0;
@@ -1380,6 +1398,11 @@ function renderMindmapPanels(uid) {
   }
 }
 
+// Toggle accessor visibility in mindmap
+function toggleAccessorVisibility(uid) {
+  renderMindmapPanels(uid);
+}
+
 // Global copy toast
 function showCopyToast(text) {
   let toast = document.getElementById('copy-toast');
@@ -1404,10 +1427,23 @@ function openMindmapFullscreen(uid) {
   const body = document.getElementById('mindmap-overlay-body');
   title.textContent = `Call Chain Mindmap — ${data.root}`;
 
+  // Check if accessor hiding is enabled in the source view
+  const srcCb = document.getElementById(`${uid}-hide-accessor`);
+  const hideAccessors = srcCb ? srcCb.checked : true;
+
   // Create a temporary container for fullscreen rendering
   const fsUid = 'mindmap-fs-' + Date.now();
-  body.innerHTML = `<div id="${fsUid}" class="mindmap-canvas" style="height:85vh"></div>`;
+  body.innerHTML = `<div style="display:flex;align-items:center;gap:8px;padding:8px 16px">
+    <label style="font-size:12px;color:var(--text2);cursor:pointer;display:flex;align-items:center;gap:4px;user-select:none">
+      <input type="checkbox" id="${fsUid}-hide-accessor" checked onchange="toggleAccessorVisibility('${fsUid}')" style="accent-color:var(--accent)" />
+      隐藏 getter/setter
+    </label>
+  </div><div id="${fsUid}" class="mindmap-canvas" style="height:85vh"></div>`;
   overlay.classList.add('active');
+
+  // Set the fullscreen checkbox to match the source view
+  const fsCb = document.getElementById(`${fsUid}-hide-accessor`);
+  if (fsCb) fsCb.checked = hideAccessors;
 
   // Store data for fullscreen rendering
   window._mindmapTrees = window._mindmapTrees || {};
