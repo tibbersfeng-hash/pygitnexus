@@ -14,6 +14,7 @@ from ..core.extractor_js import parse as parse_js
 from ..core.extractor_ts import parse as parse_ts
 from ..core.extractor_vue import parse as parse_vue
 from ..core.extractor_html import parse as parse_html
+from ..core.extractor_xml import parse as parse_xml
 from ..core.resolver import resolve_calls, resolve_imports
 from ..core.resolver_js import resolve_js_ts_calls
 from ..graph.store import GraphStore
@@ -152,6 +153,8 @@ def _parse_file(sf) -> ParsedFile:
         return parse_vue(sf.relative, sf.content)
     elif sf.lang == "html":
         return parse_html(sf.relative, sf.content)
+    elif sf.lang == "xml":
+        return parse_xml(sf.relative, sf.content)
     else:
         raise ValueError(f"Unknown language: {sf.lang}")
 
