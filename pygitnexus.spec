@@ -1,12 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for PyGitNexus.
+"""PyInstaller spec for PyGitNexus — onefile mode only."""
 
-Usage:
-    pyinstaller pygitnexus.spec              # onefile mode (default)
-    PYINSTALLER_MODE=onedir pyinstaller pygitnexus.spec  # onedir mode
-"""
-
-import os
 import sys
 from pathlib import Path
 
@@ -121,46 +115,24 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
-build_mode = os.environ.get("PYINSTALLER_MODE", "onefile")
-
-if build_mode == "onedir":
-    # --- onedir mode: no extraction at runtime ---
-    exe = EXE(
-        pyz,
-        a.scripts,
-        [],
-        exclude_binaries=True,
-        name="pygitnexus",
-        debug=False,
-        strip=False,
-        upx=True,
-        console=True,
-    )
-    coll = COLLECT(
-        exe,
-        a.binaries,
-        a.datas,
-        name="pygitnexus",
-    )
-else:
-    # --- onefile mode (default, for GitHub Releases) ---
-    exe = EXE(
-        pyz,
-        a.scripts,
-        a.binaries,
-        a.datas,
-        [],
-        name="pygitnexus",
-        debug=False,
-        bootloader_ignore_signals=False,
-        strip=False,
-        upx=True,
-        upx_exclude=[],
-        runtime_tmpdir=None,
-        console=True,
-        disable_windowed_traceback=False,
-        argv_emulation=False,
-        target_arch=None,
-        codesign_identity=None,
-        entitlements_file=None,
-    )
+# onefile mode only
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.datas,
+    [],
+    name="pygitnexus",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=True,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)

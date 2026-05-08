@@ -59,17 +59,11 @@ jobs:
       - name: Build onefile binary
         shell: bash
         run: |
-          PYINSTALLER_MODE=onefile uv run pyinstaller pygitnexus.spec
+          uv run pyinstaller pygitnexus.spec
 
       - name: Test onefile binary
         shell: bash
         run: bash .github/scripts/test_cli.sh dist/pygitnexus
-
-      - name: Build onedir bundle
-        shell: bash
-        run: |
-          rm -rf dist/pygitnexus build/pygitnexus
-          PYINSTALLER_MODE=onedir uv run pyinstaller pygitnexus.spec
 
       - name: Prepare artifacts
         shell: bash
@@ -84,13 +78,6 @@ jobs:
 
           # onefile binary
           cp "dist/pygitnexus${EXT}" "$OUTDIR/pygitnexus-${VERSION}-${OS}-${ARCH}${EXT}"
-
-          # onedir bundle (tar.gz / zip)
-          if [ "$OS" = "windows" ]; then
-            powershell -Command "Compress-Archive -Path dist/pygitnexus -DestinationPath $OUTDIR/pygitnexus-${VERSION}-${OS}-${ARCH}-onedir.zip"
-          else
-            tar -czf "$OUTDIR/pygitnexus-${VERSION}-${OS}-${ARCH}-onedir.tar.gz" -C dist pygitnexus
-          fi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
