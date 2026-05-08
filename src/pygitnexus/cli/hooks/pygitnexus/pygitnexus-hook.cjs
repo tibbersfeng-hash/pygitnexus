@@ -198,6 +198,22 @@ function sendHookResponse(hookEventName, message) {
 }
 
 /**
+ * Walk up from startDir to find a .pygitnexus/ directory.
+ * Returns the path to .pygitnexus/ or null if not found.
+ */
+function findDbDir(startDir) {
+  let dir = startDir || process.cwd();
+  for (let i = 0; i < 5; i++) {
+    const candidate = path.join(dir, '.pygitnexus');
+    if (fs.existsSync(candidate)) return candidate;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+/**
  * PostToolUse handler — detect index staleness after git mutations,
  * or prompt initial indexing if the project has never been indexed.
  */
