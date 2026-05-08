@@ -14,8 +14,8 @@ def web_cmd(host: str, port: int, repo: str | None, open: bool) -> None:
     """Launch the web dashboard in your browser."""
     from ..web.server import start_web
 
-    url = f"http://{host}:{port}"
-    click.echo(f"Starting PyGitNexus Dashboard at {url}")
+    browser_url = f"http://127.0.0.1:{port}"
+    click.echo(f"Starting PyGitNexus Dashboard at {browser_url}")
 
     if open:
         import threading
@@ -25,7 +25,7 @@ def web_cmd(host: str, port: int, repo: str | None, open: bool) -> None:
             import time
             time.sleep(1.2)
             try:
-                webbrowser.open(url)
+                webbrowser.open(browser_url)
             except Exception:
                 pass
 
