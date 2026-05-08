@@ -4,10 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
-import stat
-import tarfile
 import tempfile
-import zipfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -16,10 +13,8 @@ import pytest
 from pygitnexus.cli.install import (
     _detect_platform,
     _find_asset,
-    _find_onedir_asset,
     _find_self_binary,
-    _get_user_local_paths,
-    _extract_onedir_bundle,
+    _get_install_path,
 )
 
 
@@ -127,6 +122,16 @@ class TestFindAsset:
         result = _find_asset(release, "windows", "x86_64")
         assert result is None
 
+    def test_onefile_excludes_onedir(self):
+        """Onefile finder should not match onedir assets."""
+        release = self._release(
+            "pygitnexus-v17-linux-x86_64",
+            "pygitnexus-v17-linux-x86_64-onedir.tar.gz",
+        )
+        name, url = _find_asset(release, "linux", "x86_64")
+        assert "onedir" not in name
+        assert name == "pygitnexus-v17-linux-x86_64"
+
 
 class TestFindSelfBinary:
     """Test _find_self_binary detection logic."""
@@ -176,197 +181,3 @@ class TestWindowsInstallSimulation:
         name, url = _find_asset(release, "windows", "x86_64")
         assert name.endswith(".exe")
         assert name == "pygitnexus-v4-windows-x86_64.exe"
-
-    def test_install_dir_is_user_appdata(self):
-        """On Windows, fallback path should use AppData."""
-        import sys
-        with patch.object(sys, "platform", "win32"):
-            from pathlib import Path
-            expected = Path.home() / "AppData" / "Local" / "pygitnexus"
-            # The actual code uses this path in _get_install_path
-            # Just verify the expected path format is correct
-            assert "AppData" in str(expected)
-            assert "pygitnexus" in str(expected)
-
-
-class TestFindOnedirAsset:
-    """Test _find_onedir_asset matches onedir tarball assets correctly."""
-
-    @staticmethod
-    def _release(*assets: str) -> dict:
-        return {
-            "tag_name": "v17",
-            "name": "v17",
-            "assets": [
-                {"name": a, "browser_download_url": f"https://example.com/{a}"}
-                for a in assets
-            ],
-        }
-
-    def test_linux_x86_64(self):
-        release = self._release(
-            "pygitnexus-v17-linux-x86_64",
-            "pygitnexus-v17-linux-x86_64-onedir.tar.gz",
-            "pygitnexus-v17-windows-x86_64-onedir.zip",
-        )
-        name, url = _find_onedir_asset(release, "linux", "x86_64")
-        assert name == "pygitnexus-v17-linux-x86_64-onedir.tar.gz"
-        assert "onedir" in name
-
-    def test_linux_aarch64(self):
-        release = self._release(
-            "pygitnexus-v17-linux-aarch64-onedir.tar.gz",
-            "pygitnexus-v17-linux-x86_64-onedir.tar.gz",
-        )
-        name, url = _find_onedir_asset(release, "linux", "aarch64")
-        assert name == "pygitnexus-v17-linux-aarch64-onedir.tar.gz"
-
-    def test_macos_aarch64_matches_arm64_asset(self):
-        """macOS aarch64 should match 'macos-arm64-onedir' asset name."""
-        release = self._release(
-            "pygitnexus-v17-macos-arm64-onedir.tar.gz",
-        )
-        name, url = _find_onedir_asset(release, "macos", "aarch64")
-        assert name == "pygitnexus-v17-macos-arm64-onedir.tar.gz"
-
-    def test_windows_x86_64(self):
-        release = self._release(
-            "pygitnexus-v17-windows-x86_64-onedir.zip",
-            "pygitnexus-v17-linux-x86_64-onedir.tar.gz",
-        )
-        name, url = _find_onedir_asset(release, "windows", "x86_64")
-        assert name == "pygitnexus-v17-windows-x86_64-onedir.zip"
-        assert name.endswith(".zip")
-
-    def test_no_matching_asset(self):
-        release = self._release(
-            "pygitnexus-v17-linux-x86_64",
-            "pygitnexus-v17-windows-x86_64.exe",
-        )
-        result = _find_onedir_asset(release, "macos", "aarch64")
-        assert result is None
-
-    def test_does_not_match_onefile_binary(self):
-        """Onedir finder should not match plain onefile binaries."""
-        release = self._release(
-            "pygitnexus-v17-linux-x86_64",
-            "pygitnexus-v17-linux-aarch64",
-        )
-        result = _find_onedir_asset(release, "linux", "x86_64")
-        assert result is None
-
-    def test_onefile_excludes_onedir(self):
-        """Onefile finder should not match onedir assets."""
-        release = self._release(
-            "pygitnexus-v17-linux-x86_64",
-            "pygitnexus-v17-linux-x86_64-onedir.tar.gz",
-        )
-        name, url = _find_asset(release, "linux", "x86_64")
-        assert "onedir" not in name
-        assert name == "pygitnexus-v17-linux-x86_64"
-
-
-class TestGetUserLocalPaths:
-    """Test _get_user_local_paths returns correct paths per platform."""
-
-    def test_linux_paths(self):
-        with patch("sys.platform", "linux"):
-            lib_dir, bin_dir = _get_user_local_paths()
-            assert str(lib_dir).endswith(".local/lib/pygitnexus")
-            assert str(bin_dir).endswith(".local/bin")
-
-    def test_macos_paths(self):
-        with patch("sys.platform", "darwin"):
-            lib_dir, bin_dir = _get_user_local_paths()
-            assert str(lib_dir).endswith(".local/lib/pygitnexus")
-            assert str(bin_dir).endswith(".local/bin")
-
-    def test_windows_paths(self):
-        with patch("sys.platform", "win32"):
-            lib_dir, bin_dir = _get_user_local_paths()
-            assert "AppData" in str(lib_dir)
-            assert "pygitnexus" in str(lib_dir)
-            assert str(bin_dir).endswith("pygitnexus/bin")
-
-
-class TestExtractOnedirBundle:
-    """Test _extract_onedir_bundle extracts tar.gz and zip archives."""
-
-    def _create_tar_gz(self, dest: Path) -> Path:
-        """Create a fake tar.gz archive mimicking the CI onedir bundle.
-
-        Structure:
-            pygitnexus/
-            pygitnexus/pygitnexus         ← main binary
-            pygitnexus/_internal/lib.so   ← bundled libs
-        """
-        archive = dest / "fake-onedir.tar.gz"
-        bundle = dest / "pygitnexus"
-        bundle.mkdir(parents=True)
-        (bundle / "pygitnexus").write_text("binary")
-        internal = bundle / "_internal"
-        internal.mkdir()
-        (internal / "lib.so").write_text("lib")
-
-        with tarfile.open(archive, "w:gz") as tf:
-            # Add each file with "pygitnexus/" prefix
-            tf.add(bundle / "pygitnexus", arcname="pygitnexus/pygitnexus")
-            tf.add(internal / "lib.so", arcname="pygitnexus/_internal/lib.so")
-        return archive
-
-    def _create_zip(self, dest: Path) -> Path:
-        """Create a fake zip archive with a pygitnexus/ directory."""
-        archive = dest / "fake-onedir.zip"
-        inner = dest / "_build" / "pygitnexus"
-        inner.mkdir(parents=True)
-        (inner / "pygitnexus").write_text("binary")
-        (inner / "_internal").mkdir()
-        (inner / "_internal" / "lib.dll").write_text("lib")
-
-        with zipfile.ZipFile(archive, "w") as zf:
-            zf.write(dest / "_build" / "pygitnexus" / "pygitnexus", "pygitnexus/pygitnexus")
-            zf.write(dest / "_build" / "pygitnexus" / "_internal" / "lib.dll", "pygitnexus/_internal/lib.dll")
-        return archive
-
-    def test_extract_tar_gz(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp = Path(tmp)
-            archive = self._create_tar_gz(tmp)
-            extract_to = tmp / "extract"
-
-            ok = _extract_onedir_bundle(archive, extract_to)
-            assert ok is True
-            assert (extract_to / "pygitnexus" / "pygitnexus").exists()
-            assert (extract_to / "pygitnexus" / "_internal" / "lib.so").exists()
-
-    def test_extract_zip(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp = Path(tmp)
-            archive = self._create_zip(tmp)
-            extract_to = tmp / "extract"
-
-            ok = _extract_onedir_bundle(archive, extract_to)
-            assert ok is True
-            assert (extract_to / "pygitnexus" / "pygitnexus").exists()
-            assert (extract_to / "pygitnexus" / "_internal" / "lib.dll").exists()
-
-    def test_unsupported_format(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp = Path(tmp)
-            fake = tmp / "fake.txt"
-            fake.write_text("not an archive")
-            extract_to = tmp / "extract"
-
-            ok = _extract_onedir_bundle(fake, extract_to)
-            assert ok is False
-
-    def test_creates_extract_dir(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp = Path(tmp)
-            archive = self._create_tar_gz(tmp)
-            extract_to = tmp / "new" / "nested" / "dir"
-
-            ok = _extract_onedir_bundle(archive, extract_to)
-            assert ok is True
-            assert extract_to.exists()
-            assert (extract_to / "pygitnexus").exists()

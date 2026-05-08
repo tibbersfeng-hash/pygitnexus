@@ -203,7 +203,7 @@ def _export_to_editor(mcp_servers: dict, editor: str) -> None:
             "mcpServers": {**existing.get("mcpServers", {}), **mcp_servers}
         })
     elif editor == "codebuddy":
-        path = Path.home() / ".codebuddy" / "settings.json"
+        path = Path.home() / ".codebuddy" / "mcp.json"
         _merge_mcp_json(path, lambda existing: {
             **existing,
             "mcpServers": {**existing.get("mcpServers", {}), **mcp_servers}
@@ -649,7 +649,7 @@ def _setup_codebuddy(result: dict, bin_path: str) -> None:
     if not _dir_exists(codebuddy_dir):
         result["skipped"].append("CodeBuddy (not installed)")
         return
-    config_path = codebuddy_dir / "settings.json"
+    config_path = codebuddy_dir / "mcp.json"
     try:
         ok = _merge_jsonc_like(config_path, ["mcpServers", "pygitnexus"], _get_mcp_entry(bin_path))
         if ok:
@@ -736,7 +736,7 @@ def setup_auto(project: bool) -> None:
 
     # Project-level: write <cwd>/.codebuddy/settings.json for CodeBuddy
     if project:
-        project_cb = Path(".codebuddy") / "settings.json"
+        project_cb = Path(".codebuddy") / "mcp.json"
         try:
             ok = _merge_jsonc_like(project_cb, ["mcpServers", "pygitnexus"], _get_mcp_entry(bin_path))
             if ok:
