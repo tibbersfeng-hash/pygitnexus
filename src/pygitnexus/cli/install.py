@@ -204,6 +204,11 @@ def _install_binary(src: Path, dest_file: Path) -> None:
     """Copy a binary to the install destination."""
     dest_file.parent.mkdir(parents=True, exist_ok=True)
 
+    # Remove existing file first to avoid extended attribute / quarantine conflicts
+    if dest_file.exists():
+        dest_file.unlink()
+        click.echo(f"  Removed existing: {dest_file}")
+
     # Use shutil.copy (not copy2) to avoid copying extended attributes
     # like com.apple.quarantine that macOS may enforce
     shutil.copy(str(src), str(dest_file))
@@ -287,6 +292,10 @@ def _install_from_github(version: str | None, os_name: str, arch: str,
         ok = _download_file(download_url, temp_file)
         if not ok:
             return
+
+        # Remove existing file first to avoid extended attribute / quarantine conflicts
+        if dest_file.exists():
+            dest_file.unlink()
 
         temp_file.rename(dest_file)
 
