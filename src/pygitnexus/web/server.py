@@ -2442,7 +2442,7 @@ async def api_mindmap(request: Request) -> JSONResponse:
                     if item.get("name") == name:
                         return True
                     if item.get("children") and _find_in_tree(name, item["children"]):
-                        return False
+                        return True
                 return False
 
             for c in callers:
