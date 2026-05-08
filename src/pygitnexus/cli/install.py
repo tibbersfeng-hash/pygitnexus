@@ -203,18 +203,27 @@ def _verify_and_report(dest_file: Path) -> None:
 def _install_binary(src: Path, dest_file: Path) -> None:
     """Copy a binary to the install destination."""
     dest_file.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(str(src), str(dest_file))
+
+    # Use shutil.copy (not copy2) to avoid copying extended attributes
+    # like com.apple.quarantine that macOS may enforce
+    shutil.copy(str(src), str(dest_file))
     click.echo(f"  Copied: {src} -> {dest_file}")
 
+    # Set executable
     if sys.platform != "win32":
         current = dest_file.stat().st_mode
         dest_file.chmod(current | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
-    # macOS: remove quarantine attribute to prevent Gatekeeper from killing the process
+    # macOS: remove quarantine attribute
     if sys.platform == "darwin":
         try:
-            subprocess.run(["xattr", "-d", "com.apple.quarantine", str(dest_file)],
-                           capture_output=True)
+            result = subprocess.run(
+                ["xattr", "-d", "com.apple.quarantine", str(dest_file)],
+                capture_output=True, text=True
+            )
+            if result.returncode != 0:
+                # Not having quarantine is fine, just log it
+                pass
         except (FileNotFoundError, OSError):
             pass
 
