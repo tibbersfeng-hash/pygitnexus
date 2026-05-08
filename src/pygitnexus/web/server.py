@@ -2304,6 +2304,19 @@ async def api_mindmap(request: Request) -> JSONResponse:
 
         root_label = f"{class_name}.{method_name}"
 
+        def _is_accessor(method_name: str) -> bool:
+            """Check if a method is a getter/setter (pure field access, no business logic)."""
+            mn = method_name
+            for prefix in ("get", "set", "is"):
+                if mn.startswith(prefix) and len(mn) > len(prefix):
+                    rest = mn[len(prefix):]
+                    # Pure accessor: short name (≤16 chars total) starting with uppercase
+                    # e.g., getName, getGoodsName, getCategoryId, setGoodsIntro, isDeleted
+                    # vs getCarouselsForIndex (20 chars, business method)
+                    if rest and rest[0].isupper() and len(mn) <= 16:
+                        return True
+            return False
+
         # Upstream: USES_ENDPOINT pages as top-level, Controller as child
         # New flow: HTML page → USES_ENDPOINT → API ← EXPOSES ← Controller → CALLS → target
         upstream = []
@@ -2909,19 +2922,6 @@ async def api_mindmap(request: Request) -> JSONResponse:
         # Key: Interface and Impl must appear as SEPARATE layers.
         # Controller → Interface.method → Impl.method → Impl's callees → ...
         _MAX_DOWNSTREAM_DEPTH = 30
-
-        def _is_accessor(method_name: str) -> bool:
-            """Check if a method is a getter/setter (pure field access, no business logic)."""
-            mn = method_name
-            for prefix in ("get", "set", "is"):
-                if mn.startswith(prefix) and len(mn) > len(prefix):
-                    rest = mn[len(prefix):]
-                    # Pure accessor: short name (≤25 chars total) starting with uppercase
-                    # e.g., getName, getGoodsName, getCategoryId, setGoodsIntro, isDeleted
-                    # vs getCarouselsForIndex (30 chars, business method)
-                    if rest and rest[0].isupper() and len(mn) <= 16:
-                        return True
-            return False
 
         # Step 1: Query direct callees (these are Interface methods when source is a Controller)
         direct_callees = store.query(
