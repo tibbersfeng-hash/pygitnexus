@@ -952,6 +952,94 @@ async def api_symbol(request: Request) -> JSONResponse:
 
         callers_flat = list(page_map.values())
 
+        # Upstream BFS: trace callers recursively to find full chain (e.g., Mapper → Service → Controller)
+        _MAX_CALLER_DEPTH = 30
+        caller_lookup: dict[str, dict] = {}
+        seen_callers: set[str] = set()
+        caller_tree: list[dict] = []
+
+        for c in callers_flat:
+            ckey = f"{c.get('callerClass', '')}.{c['caller']}"
+            if ckey not in seen_callers:
+                seen_callers.add(ckey)
+                node = {"name": ckey, "via": c.get("relType", "CALLS"), "children": []}
+                caller_tree.append(node)
+                caller_lookup[ckey] = node
+
+        # Build impl↔iface mappings for seen callers (Service → ServiceImpl pattern)
+        impl_to_iface: dict[str, str] = {}
+        iface_to_impl: dict[str, str] = {}
+        for ck in list(seen_callers):
+            if '.' not in ck:
+                continue
+            cls_part = ck.rsplit('.', 1)[0]
+            method_part = ck.rsplit('.', 1)[1]
+            if 'Impl' in cls_part:
+                iface_rows = store.query(
+                    f"MATCH (c:Class)-[r]->(t) WHERE c.name CONTAINS {json.dumps(cls_part)} AND r.type = 'IMPLEMENTS' RETURN t.name AS iface LIMIT 1"
+                )
+                if iface_rows:
+                    iface_full = iface_rows[0]["iface"]
+                    # Extract short class name (Method.className stores short name, not FQN)
+                    iface_short = iface_full.rsplit('.', 1)[-1] if '.' in iface_full else iface_full
+                    impl_to_iface[ck] = f"{iface_short}.{method_part}"
+                    iface_to_impl[f"{iface_short}.{method_part}"] = ck
+
+        def _match_seen(child_key: str) -> str | None:
+            if child_key in seen_callers:
+                return child_key
+            if child_key in impl_to_iface and impl_to_iface[child_key] in seen_callers:
+                return impl_to_iface[child_key]
+            if child_key in iface_to_impl and iface_to_impl[child_key] in seen_callers:
+                return iface_to_impl[child_key]
+            return None
+
+        # BFS expansion upstream: find who calls each caller (also via Interface)
+        current_level = list(seen_callers)
+        for _depth in range(2, _MAX_CALLER_DEPTH + 1):
+            if not current_level:
+                break
+
+            # Build conditions: for each seen caller, also query via its Interface
+            cond_parts = []
+            for k in current_level:
+                if '.' not in k:
+                    continue
+                method_name = k.rsplit('.', 1)[1]
+                cls_name = k.rsplit('.', 1)[0]
+                cond_parts.append(
+                    f"(target.name = {json.dumps(method_name)} AND target.className = {json.dumps(cls_name)})"
+                )
+                if k in impl_to_iface:
+                    iface_cls = impl_to_iface[k].rsplit('.', 1)[0]
+                    cond_parts.append(
+                        f"(target.name = {json.dumps(method_name)} AND target.className = {json.dumps(iface_cls)})"
+                    )
+
+            if not cond_parts:
+                break
+            conditions = " OR ".join(cond_parts)
+            rows = store.query(
+                f"MATCH (caller:Method)-[r:CodeRelation {{type: 'CALLS'}}]->(target:Method) "
+                f"WHERE ({conditions}) "
+                f"RETURN caller.name AS srcName, caller.className AS srcClass, "
+                f"       target.name AS childName, target.className AS childClass, "
+                f"       r.confidence AS confidence"
+            )
+            next_level: list[str] = []
+            for r in rows:
+                parent_key = f"{r['srcClass']}.{r['srcName']}"
+                child_key = f"{r['childClass']}.{r['childName']}"
+                matched = _match_seen(child_key)
+                if parent_key not in seen_callers and matched is not None:
+                    seen_callers.add(parent_key)
+                    new_node = {"name": parent_key, "via": "CALLS", "children": []}
+                    if matched in caller_lookup:
+                        caller_lookup[matched]["children"].append(new_node)
+                    caller_lookup[parent_key] = new_node
+                    next_level.append(parent_key)
+            current_level = next_level
+
         # Callees: methods this method calls (with depth-2 expansion, same as api_mindmap)
         callees = store.query(
             "MATCH (source:Method)-[r:CodeRelation {type: 'CALLS'}]->(callee:Method) "
@@ -1050,7 +1138,7 @@ async def api_symbol(request: Request) -> JSONResponse:
         accesses_flat = [{"accessor": a["accessor"], "accessorClass": a.get("accessorClass", ""), "confidence": a.get("confidence")} for a in (accesses or [])]
 
         ctx = {
-            "callers": callers_flat,
+            "callers": caller_tree,
             "callees": callee_map,
             "imports": imports_flat,
             "accesses": accesses_flat,
@@ -2620,6 +2708,98 @@ async def api_mindmap(request: Request) -> JSONResponse:
                 key = f"{c['callerClass']}.{c['callerName']}"
                 if key not in ctrl_map and not _find_in_tree2(key, list(ctrl_map.values())):
                     ctrl_map[key] = {"name": key, "via": "CALLS", "children": []}
+
+            # Recursively expand upstream for each caller: ServiceImpl → Controller → Page
+            # Build impl→iface mapping for all callers
+            caller_impl_to_iface: dict[str, str] = {}
+            for c in callers:
+                svc_class = c['callerClass']
+                if 'Impl' in svc_class:
+                    impl_rows = store.query(
+                        "MATCH (c:Class)-[r:CodeRelation {type: 'IMPLEMENTS'}]->(i:Interface) "
+                        "WHERE c.name CONTAINS $impl RETURN i.name AS ifaceName LIMIT 1",
+                        {"impl": svc_class},
+                    )
+                    if impl_rows:
+                        iface_full = impl_rows[0]["ifaceName"]
+                        iface_short = iface_full.rsplit(".", 1)[-1]
+                        caller_impl_to_iface[svc_class] = iface_short
+
+            # Trace upstream from each caller using BFS
+            _seen_upstream: set[str] = set()
+            _upstream_queue: list[tuple[str, str]] = []  # (class_name, method_name)
+            _upstream_nodes: dict[str, dict] = {}  # key → node
+
+            for c in callers:
+                svc_key = f"{c['callerClass']}.{c['callerName']}"
+                _upstream_queue.append((c['callerClass'], c['callerName']))
+                _upstream_nodes[svc_key] = ctrl_map.get(svc_key)
+
+            for _depth in range(30):
+                if not _upstream_queue:
+                    break
+                next_queue = []
+                for svc_cls, svc_method in _upstream_queue:
+                    # Query both Impl and Interface callers
+                    target_classes = [svc_cls]
+                    if svc_cls in caller_impl_to_iface:
+                        target_classes.append(caller_impl_to_iface[svc_cls])
+                    elif 'Impl' in svc_cls:
+                        # Dynamically resolve Interface for newly discovered Impls
+                        impl_rows = store.query(
+                            "MATCH (c:Class)-[r:CodeRelation {type: 'IMPLEMENTS'}]->(i:Interface) "
+                            "WHERE c.name CONTAINS $impl RETURN i.name AS ifaceName LIMIT 1",
+                            {"impl": svc_cls},
+                        )
+                        if impl_rows:
+                            iface_short = impl_rows[0]["ifaceName"].rsplit(".", 1)[-1]
+                            caller_impl_to_iface[svc_cls] = iface_short
+                            target_classes.append(iface_short)
+
+                    cond = " OR ".join(
+                        f"(target.className = {json.dumps(tc)} AND target.name = {json.dumps(svc_method)})"
+                        for tc in target_classes
+                    )
+                    ctrl_rows = store.query(
+                        f"MATCH (caller:Method)-[r:CodeRelation {{type: 'CALLS'}}]->(target:Method) "
+                        f"WHERE ({cond}) "
+                        f"RETURN caller.name AS callerName, caller.className AS callerClass LIMIT 20"
+                    )
+                    for cr in ctrl_rows:
+                        ctrl_key = f"{cr['callerClass']}.{cr['callerName']}"
+                        if ctrl_key in _seen_upstream:
+                            continue
+                        _seen_upstream.add(ctrl_key)
+                        ctrl_node = {"name": ctrl_key, "via": "CALLS", "children": []}
+
+                        # Find USES_ENDPOINT pages for this Controller
+                        page_rows = store.query(
+                            "MATCH (page:Method)-[r1:CodeRelation {type: 'USES_ENDPOINT'}]->(api:API) "
+                            "<-[r2:CodeRelation {type: 'EXPOSES'}]-(ctrl:Method) "
+                            "WHERE ctrl.name = $methodName AND ctrl.className = $ctrlClass "
+                            "RETURN page.name AS pageName, "
+                            "       api.httpMethod AS httpMethod, api.httpPath AS httpPath LIMIT 10",
+                            {"methodName": cr['callerName'], "ctrlClass": cr['callerClass']},
+                        )
+                        for pc in page_rows:
+                            api_label = f"{pc.get('httpMethod', '?')} {pc.get('httpPath', '?')}"
+                            api_node = {"name": api_label, "via": "EXPOSES", "is_api": True, "children": [
+                                {"name": pc["pageName"], "via": "USES_ENDPOINT", "children": []}
+                            ]}
+                            if not any(ch["name"] == api_label for ch in ctrl_node["children"]):
+                                ctrl_node["children"].append(api_node)
+
+                        # Attach ctrl_node to all matching service nodes
+                        for svc_k, svc_node in _upstream_nodes.items():
+                            if svc_node and ctrl_key not in [ch.get("name") for ch in svc_node.get("children", [])]:
+                                svc_node["children"].append(ctrl_node)
+
+                        # If this controller is not a typical REST controller, keep tracing
+                        if "Controller" not in cr['callerClass']:
+                            _upstream_nodes[ctrl_key] = ctrl_node
+                            next_queue.append((cr['callerClass'], cr['callerName']))
+
+                _upstream_queue = next_queue
 
             # MAPS_TO callers: MyBatis Mapper methods that map to this method
             # Expand upstream: Mapper → ServiceImpl → Controller → Page
