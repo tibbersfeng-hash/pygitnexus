@@ -340,6 +340,127 @@ class TestCodeBuddyMcpJson:
         assert "pygitnexus" in (data or {}).get("mcpServers", {})
 
 
+# ─── CodeBuddy Hooks in settings.json ──────────────────────────────
+
+class TestCodeBuddyHooks:
+    """Test that setup auto writes hooks config to CodeBuddy settings.json."""
+
+    def test_setup_auto_writes_hooks(self, runner, isolated_config, fake_bin):
+        """setup auto should write PreToolUse + PostToolUse hooks to settings.json."""
+        codebuddy_dir = Path.home() / ".codebuddy"
+        if not codebuddy_dir.is_dir():
+            pytest.skip("CodeBuddy not installed")
+
+        # Ensure hook script exists
+        hook_script = codebuddy_dir / "hooks" / "pygitnexus" / "pygitnexus-hook.cjs"
+        if not hook_script.is_file():
+            pytest.skip("CodeBuddy hook script not installed")
+
+        # Backup existing settings.json
+        settings_path = codebuddy_dir / "settings.json"
+        backup = None
+        if settings_path.exists():
+            backup = settings_path.read_text(encoding="utf-8")
+
+        try:
+            # Clear existing hooks
+            existing = _read_json(settings_path) or {}
+            if "hooks" in existing:
+                del existing["hooks"]
+                _write_json(settings_path, existing)
+
+            # Run setup auto
+            with patch("pygitnexus.cli.setup._resolve_binary_path", return_value=fake_bin):
+                result = runner.invoke(setup_cmd, [])
+                assert result.exit_code == 0
+
+            # Verify hooks were written
+            assert settings_path.exists()
+            data = _read_json(settings_path)
+            assert data is not None
+            hooks = data.get("hooks", {})
+            assert "PreToolUse" in hooks
+            assert "PostToolUse" in hooks
+
+            # Verify PreToolUse matcher and command
+            pre = hooks["PreToolUse"]
+            assert any(e["matcher"] == "Grep|Glob|Bash" for e in pre)
+            for entry in pre:
+                if entry["matcher"] == "Grep|Glob|Bash":
+                    assert entry["hooks"][0]["command"] == str(hook_script)
+                    assert entry["hooks"][0]["timeout"] == 10
+
+            # Verify PostToolUse matcher and command
+            post = hooks["PostToolUse"]
+            assert any(e["matcher"] == "Bash" for e in post)
+        finally:
+            # Restore backup
+            if backup is not None:
+                settings_path.write_text(backup, encoding="utf-8")
+
+    def test_setup_auto_no_duplicate_hooks(self, runner, isolated_config, fake_bin):
+        """setup auto should not duplicate hooks if already configured."""
+        codebuddy_dir = Path.home() / ".codebuddy"
+        if not codebuddy_dir.is_dir():
+            pytest.skip("CodeBuddy not installed")
+
+        hook_script = codebuddy_dir / "hooks" / "pygitnexus" / "pygitnexus-hook.cjs"
+        if not hook_script.is_file():
+            pytest.skip("CodeBuddy hook script not installed")
+
+        settings_path = codebuddy_dir / "settings.json"
+        backup = None
+        if settings_path.exists():
+            backup = settings_path.read_text(encoding="utf-8")
+
+        try:
+            # Pre-configure hooks
+            pre_config = {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Grep|Glob|Bash",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": str(hook_script),
+                                    "timeout": 10,
+                                }
+                            ],
+                        }
+                    ],
+                    "PostToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": str(hook_script),
+                                    "timeout": 10,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            }
+            _write_json(settings_path, pre_config)
+
+            # Run setup auto twice
+            with patch("pygitnexus.cli.setup._resolve_binary_path", return_value=fake_bin):
+                runner.invoke(setup_cmd, [])
+                runner.invoke(setup_cmd, [])
+
+            # Verify no duplicates
+            data = _read_json(settings_path)
+            hooks = data.get("hooks", {})
+            pretuse = hooks.get("PreToolUse", [])
+            grep_glob_bash_count = sum(1 for e in pretuse if e.get("matcher") == "Grep|Glob|Bash")
+            assert grep_glob_bash_count == 1, f"Expected 1 PreToolUse entry, got {grep_glob_bash_count}"
+        finally:
+            if backup is not None:
+                settings_path.write_text(backup, encoding="utf-8")
+
+
 # ─── Setup MCP subcommand ───────────────────────────────────────────
 
 class TestMcpAdd:

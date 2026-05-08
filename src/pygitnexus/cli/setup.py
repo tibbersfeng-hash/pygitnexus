@@ -644,11 +644,13 @@ def _setup_opencode(result: dict, bin_path: str) -> None:
 
 
 def _setup_codebuddy(result: dict, bin_path: str) -> None:
-    """Configure CodeBuddy user-level MCP."""
+    """Configure CodeBuddy user-level MCP + Hooks."""
     codebuddy_dir = Path.home() / ".codebuddy"
     if not _dir_exists(codebuddy_dir):
         result["skipped"].append("CodeBuddy (not installed)")
         return
+
+    # MCP
     config_path = codebuddy_dir / "mcp.json"
     try:
         ok = _merge_jsonc_like(config_path, ["mcpServers", "pygitnexus"], _get_mcp_entry(bin_path))
@@ -656,6 +658,44 @@ def _setup_codebuddy(result: dict, bin_path: str) -> None:
             result["configured"].append("CodeBuddy")
     except Exception as e:
         result["errors"].append(f"CodeBuddy: {e}")
+
+    # Hooks — write to settings.json
+    settings_path = codebuddy_dir / "settings.json"
+    hook_script = codebuddy_dir / "hooks" / "pygitnexus" / "pygitnexus-hook.cjs"
+    if hook_script.is_file():
+        try:
+            settings = _read_json(settings_path) or {}
+            hooks = settings.setdefault("hooks", {})
+            # PreToolUse: intercept Grep/Glob/Bash searches
+            pre_entries = hooks.setdefault("PreToolUse", [])
+            if not any(e.get("matcher") == "Grep|Glob|Bash" for e in pre_entries):
+                pre_entries.append({
+                    "matcher": "Grep|Glob|Bash",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": str(hook_script),
+                            "timeout": 10,
+                        }
+                    ],
+                })
+            # PostToolUse: detect index staleness after git mutations
+            post_entries = hooks.setdefault("PostToolUse", [])
+            if not any(e.get("matcher") == "Bash" for e in post_entries):
+                post_entries.append({
+                    "matcher": "Bash",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": str(hook_script),
+                            "timeout": 10,
+                        }
+                    ],
+                })
+            _write_json(settings_path, settings)
+            result["configured"].append("CodeBuddy (hooks)")
+        except Exception as e:
+            result["errors"].append(f"CodeBuddy hooks: {e}")
 
 
 def _setup_codex(result: dict, bin_path: str) -> None:
