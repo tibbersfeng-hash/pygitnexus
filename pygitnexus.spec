@@ -90,6 +90,12 @@ if version_file.exists():
 
 web_dir = Path("src/pygitnexus/web")
 datas.append((str(web_dir), "pygitnexus/web"))
+
+# Hook script for CodeBuddy
+hook_script = Path("src/pygitnexus/cli/hooks/pygitnexus/pygitnexus-hook.cjs")
+if hook_script.exists():
+    datas.append((str(hook_script.parent), "pygitnexus/cli/hooks/pygitnexus"))
+
 datas.append((str(tshtml_dir), "tree_sitter_html"))
 datas.append((str(tsjava_dir), "tree_sitter_java"))
 datas.append((str(tsjs_dir), "tree_sitter_javascript"))

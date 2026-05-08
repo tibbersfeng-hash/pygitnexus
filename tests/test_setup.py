@@ -395,21 +395,23 @@ class TestCodeBuddyHooks:
         return _mock
 
     def test_setup_auto_writes_hooks(self, runner, isolated_config, fake_bin):
-        """setup auto should write PreToolUse + PostToolUse hooks to settings.json."""
+        """setup auto should extract hook script and write hooks to settings.json."""
         codebuddy_dir = Path.home() / ".codebuddy"
         if not codebuddy_dir.is_dir():
             pytest.skip("CodeBuddy not installed")
-
-        # Ensure hook script exists
-        hook_script = codebuddy_dir / "hooks" / "pygitnexus" / "pygitnexus-hook.cjs"
-        if not hook_script.is_file():
-            pytest.skip("CodeBuddy hook script not installed")
 
         # Backup existing configs (both settings.json and mcp.json are modified by setup auto)
         settings_path = codebuddy_dir / "settings.json"
         mcp_path = codebuddy_dir / "mcp.json"
         settings_backup = settings_path.read_text(encoding="utf-8") if settings_path.exists() else None
         mcp_backup = mcp_path.read_text(encoding="utf-8") if mcp_path.exists() else None
+
+        # Remove pre-existing hook script so we test extraction
+        hook_script = codebuddy_dir / "hooks" / "pygitnexus" / "pygitnexus-hook.cjs"
+        hook_backup = None
+        if hook_script.is_file():
+            hook_backup = hook_script.read_text(encoding="utf-8")
+            hook_script.unlink()
 
         try:
             # Clear existing hooks
@@ -423,6 +425,11 @@ class TestCodeBuddyHooks:
                  patch("pygitnexus.cli.setup._dir_exists", side_effect=self._only_codebuddy(codebuddy_dir)):
                 result = runner.invoke(setup_cmd, [])
                 assert result.exit_code == 0
+
+            # Verify hook script was extracted
+            assert hook_script.is_file(), "Hook script should have been extracted during setup"
+            content = hook_script.read_text(encoding="utf-8")
+            assert fake_bin in content, f"Hook script should contain the binary path: {fake_bin}"
 
             # Verify hooks were written
             assert settings_path.exists()
@@ -448,6 +455,10 @@ class TestCodeBuddyHooks:
                 settings_path.write_text(settings_backup, encoding="utf-8")
             if mcp_backup is not None:
                 mcp_path.write_text(mcp_backup, encoding="utf-8")
+            if hook_backup is not None:
+                hook_script.write_text(hook_backup, encoding="utf-8")
+            elif hook_script.is_file():
+                hook_script.unlink()
 
     def test_setup_auto_no_duplicate_hooks(self, runner, isolated_config, fake_bin):
         """setup auto should not duplicate hooks if already configured."""
@@ -456,16 +467,19 @@ class TestCodeBuddyHooks:
             pytest.skip("CodeBuddy not installed")
 
         hook_script = codebuddy_dir / "hooks" / "pygitnexus" / "pygitnexus-hook.cjs"
-        if not hook_script.is_file():
-            pytest.skip("CodeBuddy hook script not installed")
-
         settings_path = codebuddy_dir / "settings.json"
         mcp_path = codebuddy_dir / "mcp.json"
         settings_backup = settings_path.read_text(encoding="utf-8") if settings_path.exists() else None
         mcp_backup = mcp_path.read_text(encoding="utf-8") if mcp_path.exists() else None
 
+        # Backup + remove pre-existing hook script so we test extraction
+        hook_backup = None
+        if hook_script.is_file():
+            hook_backup = hook_script.read_text(encoding="utf-8")
+            hook_script.unlink()
+
         try:
-            # Pre-configure hooks
+            # Pre-configure hooks (with the expected hook script path)
             pre_config = {
                 "hooks": {
                     "PreToolUse": [
@@ -502,6 +516,9 @@ class TestCodeBuddyHooks:
                 runner.invoke(setup_cmd, [])
                 runner.invoke(setup_cmd, [])
 
+            # Verify hook script was extracted
+            assert hook_script.is_file(), "Hook script should have been extracted during setup"
+
             # Verify no duplicates for PreToolUse
             data = _read_json(settings_path)
             hooks = data.get("hooks", {})
@@ -518,6 +535,10 @@ class TestCodeBuddyHooks:
                 settings_path.write_text(settings_backup, encoding="utf-8")
             if mcp_backup is not None:
                 mcp_path.write_text(mcp_backup, encoding="utf-8")
+            if hook_backup is not None:
+                hook_script.write_text(hook_backup, encoding="utf-8")
+            elif hook_script.is_file():
+                hook_script.unlink()
 
 
 # ─── Setup MCP subcommand ───────────────────────────────────────────

@@ -643,6 +643,37 @@ def _setup_opencode(result: dict, bin_path: str) -> None:
         result["errors"].append(f"OpenCode: {e}")
 
 
+# ─── Hook script bundling ──────────────────────────────────────────
+
+_HOOK_TEMPLATE = "pygitnexus-hook.cjs"
+_HOOK_BUNDLE_DIR = Path(__file__).parent / "hooks" / "pygitnexus"
+
+
+def _extract_hook_script(dest_dir: Path, bin_path: str) -> Path | None:
+    """Extract the hook script from the bundled source, replacing the bin path placeholder.
+
+    Returns the extracted script path, or None if source not found.
+    """
+    src = _HOOK_BUNDLE_DIR / _HOOK_TEMPLATE
+    if not src.is_file():
+        # Also try from PyInstaller _MEIPASS bundle
+        if getattr(sys, "frozen", False):
+            import sys as _sys
+            bundle_root = Path(getattr(_sys, "_MEIPASS", "")) / "pygitnexus" / "cli" / "hooks" / "pygitnexus"
+            src = bundle_root / _HOOK_TEMPLATE
+    if not src.is_file():
+        return None
+
+    template = src.read_text(encoding="utf-8")
+    content = template.replace("__PYGITNEXUS_BIN_PATH__", bin_path or "")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / _HOOK_TEMPLATE
+    dest.write_text(content, encoding="utf-8")
+    return dest
+
+
+# ─── CodeBuddy setup ──────────────────────────────────────────────
+
 def _setup_codebuddy(result: dict, bin_path: str) -> None:
     """Configure CodeBuddy user-level MCP + Hooks."""
     codebuddy_dir = Path.home() / ".codebuddy"
@@ -659,11 +690,22 @@ def _setup_codebuddy(result: dict, bin_path: str) -> None:
     except Exception as e:
         result["errors"].append(f"CodeBuddy: {e}")
 
-    # Hooks — write to settings.json
-    settings_path = codebuddy_dir / "settings.json"
-    hook_script = codebuddy_dir / "hooks" / "pygitnexus" / "pygitnexus-hook.cjs"
+    # Hooks — extract script + write to settings.json
+    hook_dir = codebuddy_dir / "hooks" / "pygitnexus"
+    hook_script = hook_dir / _HOOK_TEMPLATE
+
+    # Extract hook script from bundled source if not already present
+    if not hook_script.is_file():
+        try:
+            extracted = _extract_hook_script(hook_dir, bin_path)
+            if extracted:
+                hook_script = extracted
+        except Exception as e:
+            result["errors"].append(f"CodeBuddy hook extract: {e}")
+
     if hook_script.is_file():
         try:
+            settings_path = codebuddy_dir / "settings.json"
             settings = _read_json(settings_path) or {}
             hooks = settings.setdefault("hooks", {})
             # PreToolUse: intercept Grep/Glob/Bash searches
