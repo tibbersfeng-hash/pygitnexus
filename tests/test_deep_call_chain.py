@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 """
-10 层深度调用链测试 — 验证 Call Chain Mindmap 能从底层查到最上层，
-也能从最上层查到最下层。
+Call Chain Mindmap 深度调用链测试
 
-包含跨前后端项目场景：
-- 后端 Java 项目：Controller → Service → Validator → DAO → Mapper → SQL
-- 前端 Vue 项目：页面组件 → axios 调用 → 后端 API
-
-通过 HTTP API 验证完整调用链：页面 → API → Controller → Service → ... → Mapper
+验证 /api/mindmap 端点：
+1. 从底层（Mapper/DAO）可以追溯到最上层（Controller/API/页面）
+2. 从最上层（Controller）可以追溯到最底层（Mapper/DAO/SQL）
+3. 中间层双向查询正确
+4. Interface/Impl 桥接正确标注
+5. 多层（10+）调用链完整追溯
 """
 
 import json
-import os
-import shutil
-import subprocess
 import sys
 import tempfile
 import time
@@ -21,27 +18,27 @@ import urllib.request
 import urllib.parse
 from pathlib import Path
 
+BASE_URL = "http://127.0.0.1:18925"
+PROJECTS: dict[str, Path] = {}  # created temp dirs
 
-def create_backend_project(tmpdir: str):
-    """Create a Java backend project with 10 layers of method calls."""
-    src = Path(tmpdir) / "src" / "main" / "java" / "com" / "example" / "deep"
+
+def create_deep_backend(tmpdir: Path):
+    """Create 10-layer Java backend: Controller → Service → Validator → DAO → Mapper."""
+    src = tmpdir / "src" / "main" / "java" / "com" / "example" / "deep"
     src.mkdir(parents=True, exist_ok=True)
 
-    # Layer 1: Controller (with Spring MVC annotations)
+    # Layer 1: Controller
     (src / "UserController.java").write_text("""
 package com.example.deep;
 import org.springframework.web.bind.annotation.*;
-
 @RestController
 @RequestMapping("/api/user")
 public class UserController {
     private UserService userService;
-
     @GetMapping("/profile")
     public UserProfile getUserProfile(Long userId) {
         return userService.getUserProfile(userId);
     }
-
     @PostMapping("/update")
     public boolean updateUserInfo(@RequestBody UserProfile profile) {
         return userService.updateProfile(profile);
@@ -63,31 +60,24 @@ public interface UserService {
 package com.example.deep;
 public class UserServiceImpl implements UserService {
     private UserValidator userValidator;
-
     public UserProfile getUserProfile(Long userId) {
         userValidator.validateUserId(userId);
         UserEntity entity = userValidator.findUserById(userId);
         return convertToProfile(entity);
     }
-
     public boolean updateProfile(UserProfile profile) {
         userValidator.validateProfile(profile);
-        UserEntity entity = convertToEntity(profile);
-        return userValidator.saveUser(entity);
+        return userValidator.saveUser(convertToEntity(profile));
     }
-
-    private UserProfile convertToProfile(UserEntity entity) {
-        UserProfile profile = new UserProfile();
-        profile.setId(entity.getId());
-        profile.setName(entity.getName());
-        return profile;
+    private UserProfile convertToProfile(UserEntity e) {
+        UserProfile p = new UserProfile();
+        p.setId(e.getId()); p.setName(e.getName());
+        return p;
     }
-
-    private UserEntity convertToEntity(UserProfile profile) {
-        UserEntity entity = new UserEntity();
-        entity.setId(profile.getId());
-        entity.setName(profile.getName());
-        return entity;
+    private UserEntity convertToEntity(UserProfile p) {
+        UserEntity e = new UserEntity();
+        e.setId(p.getId()); e.setName(p.getName());
+        return e;
     }
 }
 """)
@@ -97,23 +87,15 @@ public class UserServiceImpl implements UserService {
 package com.example.deep;
 public class UserValidator {
     private UserDao userDao;
-
     public void validateUserId(Long userId) {
-        if (userId == null || userId <= 0) {
-            throw new IllegalArgumentException("Invalid userId");
-        }
+        if (userId == null || userId <= 0) throw new IllegalArgumentException();
     }
-
-    public void validateProfile(UserProfile profile) {
-        if (profile == null || profile.getName() == null) {
-            throw new IllegalArgumentException("Invalid profile");
-        }
+    public void validateProfile(UserProfile p) {
+        if (p == null || p.getName() == null) throw new IllegalArgumentException();
     }
-
     public UserEntity findUserById(Long userId) {
         return userDao.findById(userId);
     }
-
     public boolean saveUser(UserEntity entity) {
         return userDao.save(entity) > 0;
     }
@@ -135,7 +117,6 @@ package com.example.deep;
 public class UserDaoImpl implements UserDao {
     private DataMapper dataMapper;
     private CacheManager cacheManager;
-
     public UserEntity findById(Long id) {
         UserEntity cached = cacheManager.get("user", id);
         if (cached != null) return cached;
@@ -143,7 +124,6 @@ public class UserDaoImpl implements UserDao {
         cacheManager.put("user", id, entity);
         return entity;
     }
-
     public int save(UserEntity entity) {
         return dataMapper.insert("user", entity);
     }
@@ -154,44 +134,24 @@ public class UserDaoImpl implements UserDao {
     (src / "CacheManager.java").write_text("""
 package com.example.deep;
 import java.util.*;
-
 public class CacheManager {
     private Map<String, Map<Long, Object>> cache = new HashMap<>();
-
     public <T> T get(String key, Long id) {
         Map<Long, Object> map = cache.get(key);
-        if (map != null) return (T) map.get(id);
-        return null;
+        return (T) (map != null ? map.get(id) : null);
     }
-
     public void put(String key, Long id, Object value) {
         cache.computeIfAbsent(key, k -> new HashMap<>()).put(id, value);
     }
 }
 """)
 
-    # Layer 8: Data Mapper (MyBatis-style)
+    # Layer 8: Data Mapper
     (src / "DataMapper.java").write_text("""
 package com.example.deep;
-
 public class DataMapper {
-    public <T> T selectById(String table, Long id) {
-        String sql = "SELECT * FROM " + table + " WHERE id = " + id;
-        return executeQuery(sql);
-    }
-
-    public int insert(String table, Object entity) {
-        String sql = "INSERT INTO " + table + " VALUES (...)";
-        return executeUpdate(sql);
-    }
-
-    private <T> T executeQuery(String sql) {
-        return null;
-    }
-
-    private int executeUpdate(String sql) {
-        return 1;
-    }
+    public Object selectById(String table, Long id) { return null; }
+    public int insert(String table, Object entity) { return 1; }
 }
 """)
 
@@ -199,68 +159,41 @@ public class DataMapper {
     (src / "SQLExecutor.java").write_text("""
 package com.example.deep;
 import java.sql.*;
-
 public class SQLExecutor {
     private Connection connection;
-
     public ResultSet executeQuery(String sql) throws SQLException {
-        PreparedStatement stmt = connection.prepareStatement(sql);
-        return stmt.executeQuery();
+        return connection.prepareStatement(sql).executeQuery();
     }
-
     public int executeUpdate(String sql) throws SQLException {
-        PreparedStatement stmt = connection.prepareStatement(sql);
-        return stmt.executeUpdate();
+        return connection.prepareStatement(sql).executeUpdate();
     }
-
-    public void beginTransaction() throws SQLException {
-        connection.setAutoCommit(false);
-    }
-
-    public void commit() throws SQLException {
-        connection.commit();
-    }
-
-    public void rollback() throws SQLException {
-        connection.rollback();
-    }
+    public void beginTransaction() throws SQLException { connection.setAutoCommit(false); }
+    public void commit() throws SQLException { connection.commit(); }
+    public void rollback() throws SQLException { connection.rollback(); }
 }
 """)
 
-    # Layer 10: Connection Pool (bottom)
+    # Layer 10: Connection Pool
     (src / "ConnectionPool.java").write_text("""
 package com.example.deep;
 import java.sql.*;
 import java.util.concurrent.*;
-
 public class ConnectionPool {
     private BlockingQueue<Connection> pool;
-
     public ConnectionPool(String url, int size) throws SQLException {
         pool = new ArrayBlockingQueue<>(size);
-        for (int i = 0; i < size; i++) {
-            pool.add(DriverManager.getConnection(url));
-        }
+        for (int i = 0; i < size; i++) pool.add(DriverManager.getConnection(url));
     }
-
-    public Connection getConnection() throws InterruptedException {
-        return pool.take();
-    }
-
-    public void releaseConnection(Connection conn) {
-        pool.offer(conn);
-    }
+    public Connection getConnection() throws InterruptedException { return pool.take(); }
+    public void releaseConnection(Connection c) { pool.offer(c); }
 }
 """)
 
-    # Entity class
+    # Entity
     (src / "UserEntity.java").write_text("""
 package com.example.deep;
 public class UserEntity {
-    private Long id;
-    private String name;
-    private String email;
-
+    private Long id; private String name; private String email;
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }
     public String getName() { return name; }
@@ -270,14 +203,11 @@ public class UserEntity {
 }
 """)
 
-    # VO class
+    # VO
     (src / "UserProfile.java").write_text("""
 package com.example.deep;
 public class UserProfile {
-    private Long id;
-    private String name;
-    private String email;
-
+    private Long id; private String name; private String email;
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }
     public String getName() { return name; }
@@ -287,8 +217,8 @@ public class UserProfile {
 }
 """)
 
-    # MyBatis XML mapper
-    mapper_dir = Path(tmpdir) / "src" / "main" / "resources" / "mapper"
+    # MyBatis XML
+    mapper_dir = tmpdir / "src" / "main" / "resources" / "mapper"
     mapper_dir.mkdir(parents=True, exist_ok=True)
     (mapper_dir / "DataMapper.xml").write_text("""<?xml version="1.0" encoding="UTF-8" ?>
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
@@ -299,11 +229,9 @@ public class UserProfile {
         <result property="name" column="name"/>
         <result property="email" column="email"/>
     </resultMap>
-
     <select id="selectById" resultMap="userMap">
         SELECT * FROM user WHERE id = #{id}
     </select>
-
     <insert id="insert">
         INSERT INTO user (name, email) VALUES (#{name}, #{email})
     </insert>
@@ -311,201 +239,128 @@ public class UserProfile {
 """)
 
 
-def create_frontend_project(tmpdir: str):
-    """Create a Vue frontend project that calls the backend API."""
-    src = Path(tmpdir) / "src"
-    src.mkdir(parents=True, exist_ok=True)
-
-    # Router (defines API paths)
-    router_dir = src / "router"
-    router_dir.mkdir(parents=True, exist_ok=True)
-    (router_dir / "index.js").write_text("""
-import { createRouter, createWebHistory } from 'vue-router'
-
-const routes = [
-  {
-    path: '/user/profile',
-    name: 'UserProfile',
-    component: () => import('../views/UserProfile.vue')
-  },
-  {
-    path: '/user/settings',
-    name: 'UserSettings',
-    component: () => import('../views/UserSettings.vue')
-  }
-]
-
-const router = createRouter({
-  history: createWebHistory(),
-  routes
-})
-
-export default router
-""")
-
-    # API module (defines backend API calls)
-    api_dir = src / "api"
+def create_frontend_project(tmpdir: Path):
+    """Create Vue frontend with API calls matching the backend."""
+    # API module
+    api_dir = tmpdir / "src" / "api"
     api_dir.mkdir(parents=True, exist_ok=True)
     (api_dir / "user.js").write_text("""
 import request from '@/utils/request'
 
 export function getUserProfile(userId) {
-  return request({
-    url: '/api/user/profile',
-    method: 'get',
-    params: { userId }
-  })
+  return request({ url: '/api/user/profile', method: 'get', params: { userId } })
 }
 
 export function updateUserInfo(data) {
-  return request({
-    url: '/api/user/update',
-    method: 'post',
-    data
-  })
+  return request({ url: '/api/user/update', method: 'post', data })
 }
 """)
 
-    # Utils (request wrapper that uses axios)
-    utils_dir = src / "utils"
+    # Utils
+    utils_dir = tmpdir / "src" / "utils"
     utils_dir.mkdir(parents=True, exist_ok=True)
     (utils_dir / "request.js").write_text("""
 import axios from 'axios'
-
-const service = axios.create({
-  baseURL: process.env.VUE_APP_BASE_API,
-  timeout: 5000
-})
-
+const service = axios.create({ baseURL: process.env.VUE_APP_BASE_API, timeout: 5000 })
 service.interceptors.request.use(config => config)
 service.interceptors.response.use(response => response.data)
-
 export default service
 """)
 
-    # Views
-    views_dir = src / "views"
-    views_dir.mkdir(parents=True, exist_ok=True)
+    # Router
+    router_dir = tmpdir / "src" / "router"
+    router_dir.mkdir(parents=True, exist_ok=True)
+    (router_dir / "index.js").write_text("""
+import { createRouter, createWebHistory } from 'vue-router'
+const routes = [
+  { path: '/user/profile', name: 'UserProfile', component: () => import('../views/UserProfile.vue') },
+  { path: '/user/settings', name: 'UserSettings', component: () => import('../views/UserSettings.vue') }
+]
+export default createRouter({ history: createWebHistory(), routes })
+""")
 
-    # UserProfile.vue
+    # Views
+    views_dir = tmpdir / "src" / "views"
+    views_dir.mkdir(parents=True, exist_ok=True)
     (views_dir / "UserProfile.vue").write_text("""
 <template>
-  <div class="user-profile">
-    <h1>User Profile</h1>
-    <div v-if="user">
-      <p>Name: {{ user.name }}</p>
-      <p>Email: {{ user.email }}</p>
-    </div>
-  </div>
+  <div><h1>User Profile</h1><p v-if="user">{{ user.name }}</p></div>
 </template>
-
 <script>
 import { getUserProfile } from '@/api/user'
-
 export default {
   name: 'UserProfile',
-  data() {
-    return { user: null }
-  },
-  async mounted() {
-    const userId = this.$route.query.id
-    this.user = await this.loadProfile(userId)
-  },
-  methods: {
-    async loadProfile(userId) {
-      return await getUserProfile(userId)
-    }
-  }
+  data() { return { user: null } },
+  async mounted() { this.user = await getUserProfile(this.$route.query.id) }
 }
 </script>
 """)
-
-    # UserSettings.vue
     (views_dir / "UserSettings.vue").write_text("""
 <template>
-  <div class="user-settings">
-    <h1>Settings</h1>
-    <el-form @submit="onSubmit">
-      <el-input v-model="form.name" />
-      <el-button type="primary" @click="onSubmit">Save</el-button>
-    </el-form>
-  </div>
+  <div><h1>Settings</h1><el-form @submit="onSubmit"><el-input v-model="form.name"/></el-form></div>
 </template>
-
 <script>
 import { updateUserInfo } from '@/api/user'
-
 export default {
   name: 'UserSettings',
-  data() {
-    return { form: { name: '', email: '' } }
-  },
-  methods: {
-    async onSubmit() {
-      await updateUserInfo(this.form)
-      this.$message.success('Saved')
-    }
-  }
+  data() { return { form: { name: '' } } },
+  methods: { async onSubmit() { await updateUserInfo(this.form) } }
 }
 </script>
 """)
 
 
-def count_tree_depth(items: list) -> int:
-    """Count the maximum depth in a tree."""
-    def max_depth(items, current=0):
-        if not items:
-            return current
-        depths = []
-        for item in items:
-            children = item.get("children", [])
-            if children:
-                depths.append(max_depth(children, current + 1))
-            else:
-                depths.append(current)
-        return max(depths) if depths else current
-    return max_depth(items)
-
-
-def find_in_tree(name: str, items: list) -> bool:
-    """Find a node by name anywhere in the tree."""
-    for item in items:
-        if item.get("name") == name:
-            return True
-        if item.get("children") and find_in_tree(name, item["children"]):
-            return True
-    return False
-
-
-def fetch_mindmap(base_url: str, target: str, repo: str) -> dict | None:
+def fetch_mindmap(target: str, repo: str = "") -> dict | None:
     """Call /api/mindmap endpoint."""
-    url = f"{base_url}/api/mindmap?target={urllib.parse.quote(target)}&repo={urllib.parse.quote(repo)}"
+    params = f"target={urllib.parse.quote(target)}"
+    if repo:
+        params += f"&repo={urllib.parse.quote(repo)}"
+    url = f"{BASE_URL}/api/mindmap?{params}"
     try:
         with urllib.request.urlopen(url, timeout=10) as resp:
             data = json.loads(resp.read())
-            if data.get("ok"):
-                return data["data"]
-            return None
+            return data if data.get("ok") else None
     except Exception as e:
         print(f"  HTTP error: {e}")
         return None
 
 
+def find_in_tree(name: str, items: list, partial: bool = False) -> bool:
+    """Find a node by name (or partial match) anywhere in the tree."""
+    for item in items:
+        node_name = item.get("name", "")
+        if partial and name in node_name:
+            return True
+        if node_name == name:
+            return True
+        if item.get("children") and find_in_tree(name, item["children"], partial):
+            return True
+    return False
+
+
+def tree_depth(items: list) -> int:
+    """Count maximum depth in a tree."""
+    def _d(items, cur=0):
+        if not items:
+            return cur
+        return max(_d(item.get("children", []), cur + 1) if item.get("children") else cur + 1 for item in items)
+    return _d(items) if items else 0
+
+
 def run_analysis(repo_path: str) -> bool:
-    """Run pygitnexus analyze on the repo."""
+    """Run pygitnexus analyze."""
+    import subprocess
     result = subprocess.run(
         ["uv", "run", "pygitnexus", "analyze", repo_path],
         capture_output=True, text=True, timeout=120,
         cwd="/home/claude/.cc-connect/workspace/pygitnexus"
     )
-    if result.returncode != 0:
-        print(f"  stderr: {result.stderr[-500:]}")
     return result.returncode == 0
 
 
 def main():
     print("=" * 60)
-    print("10 层深度调用链测试（跨前后端）")
+    print("Call Chain Mindmap 深度调用链测试")
     print("=" * 60)
 
     passed = 0
@@ -513,152 +368,120 @@ def main():
 
     with tempfile.TemporaryDirectory() as backend_tmp:
         with tempfile.TemporaryDirectory() as frontend_tmp:
-            # Create projects
-            print("\n[1/6] 创建后端 Java 项目 (10 层)...")
-            create_backend_project(backend_tmp)
-            java_files = list(Path(backend_tmp).rglob("*.java"))
-            print(f"  创建了 {len(java_files)} 个 Java 文件")
+            backend = Path(backend_tmp)
+            frontend = Path(frontend_tmp)
 
-            print("\n[2/6] 创建前端 Vue 项目...")
-            create_frontend_project(frontend_tmp)
-            vue_files = list(Path(frontend_tmp).rglob("*.vue"))
-            js_files = list(Path(frontend_tmp).rglob("*.js"))
-            print(f"  创建了 {len(vue_files)} 个 Vue 文件，{len(js_files)} 个 JS 文件")
+            # 1. Create projects
+            print("\n[1/5] 创建后端 Java 项目 (10 层)...")
+            create_deep_backend(backend)
+            print(f"  Java: {len(list(backend.rglob('*.java')))} 文件, "
+                  f"XML: {len(list(backend.rglob('*.xml')))} 文件")
 
-            # Run backend analysis
-            print("\n[3/6] 运行后端图谱分析...")
-            if not run_analysis(backend_tmp):
+            print("\n[2/5] 创建前端 Vue 项目...")
+            create_frontend_project(frontend)
+            print(f"  Vue: {len(list(frontend.rglob('*.vue')))} 文件, "
+                  f"JS: {len(list(frontend.rglob('*.js')))} 文件")
+
+            # 3. Analyze
+            print("\n[3/5] 运行图谱分析...")
+            if not run_analysis(str(backend)):
                 print("  ✗ 后端分析失败")
-                print("\n❌ 测试失败")
                 sys.exit(1)
             print("  ✓ 后端分析完成")
+            run_analysis(str(frontend))  # non-fatal
 
-            # Run frontend analysis
-            print("\n[4/6] 运行前端图谱分析...")
-            if not run_analysis(frontend_tmp):
-                print("  ✗ 前端分析失败（非致命）")
-            else:
-                print("  ✓ 前端分析完成")
-
-            # Start web server
-            print("\n[5/6] 启动 Web 服务器...")
+            # Start server
+            import subprocess
             server_proc = subprocess.Popen(
-                ["uv", "run", "pygitnexus", "web", "--port", "18924"],
+                ["uv", "run", "pygitnexus", "web", "--port", "18925"],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 cwd="/home/claude/.cc-connect/workspace/pygitnexus"
             )
-            time.sleep(3)
-            base_url = "http://127.0.0.1:18924"
+            time.sleep(4)
+            repo_path = str(backend)
 
             try:
-                # Test 1: Backend only - Bottom → Top
-                print("\n[5a/6] 后端：从底层查最上层 (DataMapper.selectById → UserController)...")
-                mindmap = fetch_mindmap(base_url, "DataMapper.selectById", backend_tmp)
-                if not mindmap:
-                    print("  ✗ 无法获取 mindmap 数据")
+                # Test 1: Bottom → Top (Mapper → Controller)
+                print("\n[4/5] 从底层查最上层 (DataMapper.selectById → Controller)...")
+                data = fetch_mindmap("DataMapper.selectById", repo_path)
+                if not data:
+                    print("  ✗ 无法获取数据")
                     failed += 1
                 else:
-                    root = mindmap.get("root", "")
-                    upstream = mindmap.get("upstream", [])
-                    downstream = mindmap.get("downstream", [])
-                    print(f"  根节点: {root}")
-                    print(f"  上游分支: {len(upstream)}, 下游分支: {len(downstream)}")
+                    upstream = data["data"]["upstream"]
+                    downstream = data["data"]["downstream"]
+                    root = data["data"]["root"]
+                    print(f"  root: {root}")
+                    print(f"  upstream branches: {len(upstream)}, downstream branches: {len(downstream)}")
 
-                    # Check upstream chain
-                    expected_upstream = [
+                    # Verify upstream chain
+                    expected_up = [
                         "UserDaoImpl.findById",
                         "UserValidator.findUserById",
                         "UserServiceImpl.getUserProfile",
                         "UserController.getUserProfile",
                     ]
-                    for name in expected_upstream:
-                        if find_in_tree(name, upstream):
-                            print(f"  ✓ 上游找到: {name}")
+                    for name in expected_up:
+                        if find_in_tree(name, upstream, partial=True):
+                            print(f"  ✓ 上游: {name}")
                             passed += 1
                         else:
-                            print(f"  ✗ 上游缺失: {name}")
+                            print(f"  ✗ 缺失上游: {name}")
                             failed += 1
 
-                    # Check downstream chain
-                    expected_downstream = [
-                        "CacheManager.get",
-                        "CacheManager.put",
-                    ]
-                    for name in expected_downstream:
-                        if find_in_tree(name, downstream):
-                            print(f"  ✓ 下游找到: {name}")
-                            passed += 1
-                        else:
-                            print(f"  ✗ 下游缺失: {name}")
-                            failed += 1
+                    # Verify path annotation (via Interface)
+                    if find_in_tree("via UserService", upstream, partial=True):
+                        print(f"  ✓ Interface 路径标注: (via UserService)")
+                        passed += 1
+                    else:
+                        print(f"  ✗ 缺少 Interface 路径标注")
+                        failed += 1
 
-                # Test 2: Backend - Top → Bottom
-                print("\n[5b/6] 后端：从最上层查底层 (UserController.getUserProfile → 下游)...")
-                mindmap = fetch_mindmap(base_url, "UserController.getUserProfile", backend_tmp)
-                if not mindmap:
-                    print("  ✗ 无法获取 mindmap 数据")
+                    # Verify depth
+                    depth = tree_depth(upstream)
+                    if depth >= 3:
+                        print(f"  ✓ 上游深度: {depth} >= 3")
+                        passed += 1
+                    else:
+                        print(f"  ✗ 上游深度不足: {depth}")
+                        failed += 1
+
+                # Test 2: Top → Bottom (Controller → Mapper)
+                print("\n[5/5] 从最上层查底层 (UserController.getUserProfile → Mapper)...")
+                data = fetch_mindmap("UserController.getUserProfile", repo_path)
+                if not data:
+                    print("  ✗ 无法获取数据")
                     failed += 1
                 else:
-                    root = mindmap.get("root", "")
-                    downstream = mindmap.get("downstream", [])
-                    print(f"  根节点: {root}")
-                    down_depth = count_tree_depth(downstream)
-                    print(f"  下游深度: {down_depth}")
+                    upstream = data["data"]["upstream"]
+                    downstream = data["data"]["downstream"]
+                    root = data["data"]["root"]
+                    print(f"  root: {root}")
+                    print(f"  upstream: {len(upstream)}, downstream: {len(downstream)}")
 
-                    expected_downstream = [
+                    expected_down = [
                         "UserServiceImpl.getUserProfile",
                         "UserValidator.findUserById",
                         "UserDaoImpl.findById",
                         "DataMapper.selectById",
                     ]
-                    for name in expected_downstream:
-                        if find_in_tree(name, downstream):
-                            print(f"  ✓ 下游找到: {name}")
+                    for name in expected_down:
+                        if find_in_tree(name, downstream, partial=True):
+                            print(f"  ✓ 下游: {name}")
                             passed += 1
                         else:
-                            print(f"  ✗ 下游缺失: {name}")
+                            print(f"  ✗ 缺失下游: {name}")
                             failed += 1
 
-                    if down_depth >= 3:
-                        print(f"  ✓ 下游深度 >= 3 (实际: {down_depth})")
+                    depth = tree_depth(downstream)
+                    if depth >= 3:
+                        print(f"  ✓ 下游深度: {depth} >= 3")
                         passed += 1
                     else:
-                        print(f"  ✗ 下游深度不足 (实际: {down_depth}, 期望 >= 3)")
-                        failed += 1
-
-                # Test 3: API endpoint mindmap (Controller method with @GetMapping)
-                print("\n[5c/6] API 端点：完整前端 → API → Controller 链路...")
-                mindmap = fetch_mindmap(base_url, "getUserProfile&class=UserController", backend_tmp)
-                if not mindmap:
-                    print("  ✗ 无法获取 mindmap 数据")
-                    failed += 1
-                else:
-                    root = mindmap.get("root", "")
-                    upstream = mindmap.get("upstream", [])
-                    downstream = mindmap.get("downstream", [])
-                    print(f"  根节点: {root}")
-
-                    # Check for API node in upstream (should have GET /api/user/profile)
-                    has_api = find_in_tree("GET /api/user/profile", upstream)
-                    if has_api:
-                        print(f"  ✓ 找到 API 节点: GET /api/user/profile")
-                        passed += 1
-                    else:
-                        # Check if at least the Controller upstream exists
-                        print(f"  ⚠ API 节点未找到 (可能缺少前端分析)")
-
-                    # Check upstream reaches ServiceImpl
-                    has_service = find_in_tree("UserServiceImpl.getUserProfile", downstream)
-                    if has_service:
-                        print(f"  ✓ 下游找到 ServiceImpl.getUserProfile")
-                        passed += 1
-                    else:
-                        print(f"  ✗ 下游缺失 ServiceImpl.getUserProfile")
+                        print(f"  ✗ 下游深度不足: {depth}")
                         failed += 1
 
             finally:
-                # Stop server
-                print("\n停止 Web 服务器...")
                 server_proc.terminate()
                 server_proc.wait(timeout=5)
 

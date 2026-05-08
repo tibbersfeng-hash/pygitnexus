@@ -2740,7 +2740,7 @@ async def api_mindmap(request: Request) -> JSONResponse:
                     break
                 next_queue = []
                 for svc_cls, svc_method in _upstream_queue:
-                    # Query both Impl and Interface callers
+                    # Query each target class separately to track which path was taken
                     target_classes = [svc_cls]
                     if svc_cls in caller_impl_to_iface:
                         target_classes.append(caller_impl_to_iface[svc_cls])
@@ -2756,48 +2756,61 @@ async def api_mindmap(request: Request) -> JSONResponse:
                             caller_impl_to_iface[svc_cls] = iface_short
                             target_classes.append(iface_short)
 
-                    cond = " OR ".join(
-                        f"(target.className = {json.dumps(tc)} AND target.name = {json.dumps(svc_method)})"
-                        for tc in target_classes
-                    )
-                    ctrl_rows = store.query(
-                        f"MATCH (caller:Method)-[r:CodeRelation {{type: 'CALLS'}}]->(target:Method) "
-                        f"WHERE ({cond}) "
-                        f"RETURN caller.name AS callerName, caller.className AS callerClass LIMIT 20"
-                    )
-                    for cr in ctrl_rows:
-                        ctrl_key = f"{cr['callerClass']}.{cr['callerName']}"
-                        if ctrl_key in _seen_upstream:
-                            continue
-                        _seen_upstream.add(ctrl_key)
-                        ctrl_node = {"name": ctrl_key, "via": "CALLS", "children": []}
-
-                        # Find USES_ENDPOINT pages for this Controller
-                        page_rows = store.query(
-                            "MATCH (page:Method)-[r1:CodeRelation {type: 'USES_ENDPOINT'}]->(api:API) "
-                            "<-[r2:CodeRelation {type: 'EXPOSES'}]-(ctrl:Method) "
-                            "WHERE ctrl.name = $methodName AND ctrl.className = $ctrlClass "
-                            "RETURN page.name AS pageName, "
-                            "       api.httpMethod AS httpMethod, api.httpPath AS httpPath LIMIT 10",
-                            {"methodName": cr['callerName'], "ctrlClass": cr['callerClass']},
+                    for tc in target_classes:
+                        ctrl_rows = store.query(
+                            f"MATCH (caller:Method)-[r:CodeRelation {{type: 'CALLS'}}]->(target:Method) "
+                            f"WHERE target.className = {json.dumps(tc)} AND target.name = {json.dumps(svc_method)} "
+                            f"RETURN caller.name AS callerName, caller.className AS callerClass LIMIT 20"
                         )
-                        for pc in page_rows:
-                            api_label = f"{pc.get('httpMethod', '?')} {pc.get('httpPath', '?')}"
-                            api_node = {"name": api_label, "via": "EXPOSES", "is_api": True, "children": [
-                                {"name": pc["pageName"], "via": "USES_ENDPOINT", "children": []}
-                            ]}
-                            if not any(ch["name"] == api_label for ch in ctrl_node["children"]):
-                                ctrl_node["children"].append(api_node)
+                        path_label = f" (via {tc})" if len(target_classes) > 1 else ""
 
-                        # Attach ctrl_node to all matching service nodes
-                        for svc_k, svc_node in _upstream_nodes.items():
-                            if svc_node and ctrl_key not in [ch.get("name") for ch in svc_node.get("children", [])]:
-                                svc_node["children"].append(ctrl_node)
+                        for cr in ctrl_rows:
+                            ctrl_key = f"{cr['callerClass']}.{cr['callerName']}"
+                            display_name = ctrl_key + path_label if path_label else ctrl_key
 
-                        # If this controller is not a typical REST controller, keep tracing
-                        if "Controller" not in cr['callerClass']:
-                            _upstream_nodes[ctrl_key] = ctrl_node
-                            next_queue.append((cr['callerClass'], cr['callerName']))
+                            if ctrl_key in _seen_upstream:
+                                # Already seen, but add a labeled copy to tree if path differs
+                                if path_label:
+                                    ctrl_node = {"name": display_name, "via": "CALLS", "children": []}
+                                    # Find matching parent nodes and attach
+                                    for svc_k, svc_node in _upstream_nodes.items():
+                                        if svc_node:
+                                            existing_names = [ch.get("name", "") for ch in svc_node.get("children", [])]
+                                            if display_name not in existing_names:
+                                                svc_node["children"].append(ctrl_node)
+                                continue
+                            _seen_upstream.add(ctrl_key)
+                            ctrl_node = {"name": display_name, "via": "CALLS", "children": []}
+
+                            # Find USES_ENDPOINT pages for this Controller
+                            page_rows = store.query(
+                                "MATCH (page:Method)-[r1:CodeRelation {type: 'USES_ENDPOINT'}]->(api:API) "
+                                "<-[r2:CodeRelation {type: 'EXPOSES'}]-(ctrl:Method) "
+                                "WHERE ctrl.name = $methodName AND ctrl.className = $ctrlClass "
+                                "RETURN page.name AS pageName, "
+                                "       api.httpMethod AS httpMethod, api.httpPath AS httpPath LIMIT 10",
+                                {"methodName": cr['callerName'], "ctrlClass": cr['callerClass']},
+                            )
+                            for pc in page_rows:
+                                api_label = f"{pc.get('httpMethod', '?')} {pc.get('httpPath', '?')}"
+                                api_node = {"name": api_label, "via": "EXPOSES", "is_api": True, "children": [
+                                    {"name": pc["pageName"], "via": "USES_ENDPOINT", "children": []}
+                                ]}
+                                if not any(ch["name"] == api_label for ch in ctrl_node["children"]):
+                                    ctrl_node["children"].append(api_node)
+
+                            # Attach ctrl_node to all matching service nodes
+                            for svc_k, svc_node in _upstream_nodes.items():
+                                if svc_node:
+                                    existing_names = [ch.get("name", "") for ch in svc_node.get("children", [])]
+                                    if display_name not in existing_names:
+                                        svc_node["children"].append(ctrl_node)
+
+                            # If this caller is not a Controller, keep tracing
+                            if "Controller" not in cr['callerClass']:
+                                _upstream_nodes[ctrl_key] = ctrl_node
+                                if (cr['callerClass'], cr['callerName']) not in next_queue:
+                                    next_queue.append((cr['callerClass'], cr['callerName']))
 
                 _upstream_queue = next_queue
 
@@ -2885,17 +2898,54 @@ async def api_mindmap(request: Request) -> JSONResponse:
             upstream = list(ctrl_map.values())
 
         # Downstream: build nested tree with BFS expansion up to 30 hops
+        # Key: Interface and Impl must appear as SEPARATE layers.
+        # Controller → Interface.method → Impl.method → Impl's callees → ...
         _MAX_DOWNSTREAM_DEPTH = 30
-        callees = store.query(
+
+        # Step 1: Query direct callees (these are Interface methods when source is a Controller)
+        direct_callees = store.query(
             "MATCH (source:Method)-[r:CodeRelation {type: 'CALLS'}]->(callee:Method) "
             "WHERE source.className = $cls AND source.name = $method "
             "RETURN callee.name AS calleeName, callee.className AS calleeClass LIMIT 30",
             {"cls": class_name, "method": method_name},
         )
+
+        # Step 2: For each Interface callee, find its Impl and add Impl's callees
+        # These will be children of the Impl node, not siblings of the Interface
+        callee_impl_callees: dict[str, list[dict]] = {}  # iface_key → list of impl's callee rows
+        callee_iface_to_impl: dict[str, str] = {}  # iface_key → "ImplClass.methodName"
+
+        for c in direct_callees:
+            iface_cls = c['calleeClass']
+            iface_method = c['calleeName']
+            iface_key = f"{iface_cls}.{iface_method}"
+
+            # Check if this callee class is an Interface
+            iface_impl_rows = store.query(
+                "MATCH (c:Class)-[r:CodeRelation {type: 'IMPLEMENTS'}]->(i:Interface) "
+                "WHERE i.name CONTAINS $iface RETURN c.name AS implName LIMIT 5",
+                {"iface": iface_cls},
+            )
+            for ir in iface_impl_rows:
+                impl_short = ir["implName"].rsplit(".", 1)[-1]
+                impl_key = f"{impl_short}.{iface_method}"
+                callee_iface_to_impl[iface_key] = impl_key
+
+                # Query Impl's callees (these become grandchildren of Interface)
+                impl_callees_list = store.query(
+                    "MATCH (source:Method)-[r:CodeRelation {type: 'CALLS'}]->(callee:Method) "
+                    "WHERE source.className = $cls AND source.name = $method "
+                    "RETURN callee.name AS calleeName, callee.className AS calleeClass LIMIT 30",
+                    {"cls": impl_short, "method": iface_method},
+                )
+                callee_impl_callees[iface_key] = impl_callees_list
+
+        # Step 3: Build level-1 nodes (Interface methods)
         downstream: list[dict] = []
         callee_map: dict[str, dict] = {}
         seen: set[str] = set()
-        for c in callees:
+
+        for c in direct_callees:
             key = f"{c['calleeClass']}.{c['calleeName']}"
             if key not in seen:
                 seen.add(key)
@@ -2903,32 +2953,146 @@ async def api_mindmap(request: Request) -> JSONResponse:
                 callee_map[key] = node
                 downstream.append(node)
 
-        # BFS expansion up to 30 hops
-        current_level = list(callee_map.keys())
+        # Step 4: For each Interface callee, add its Impl as child (level 2)
+        for iface_key, impl_key in callee_iface_to_impl.items():
+            if iface_key not in callee_map:
+                continue
+            if impl_key not in seen:
+                seen.add(impl_key)
+                impl_node: dict[str, Any] = {"name": impl_key, "via": "IMPLEMENTS", "children": []}
+                callee_map[iface_key]["children"].append(impl_node)
+                callee_map[impl_key] = impl_node
+
+                # Add Impl's callees as grandchildren (level 3)
+                for cc in callee_impl_callees.get(iface_key, []):
+                    cc_key = f"{cc['calleeClass']}.{cc['calleeName']}"
+                    if cc_key not in seen:
+                        seen.add(cc_key)
+                        cc_node: dict[str, Any] = {"name": cc_key, "via": "CALLS", "children": []}
+                        callee_map[impl_key]["children"].append(cc_node)
+                        callee_map[cc_key] = cc_node
+
+        # Step 5: BFS expansion from level-3+ (or level-2 if no Interface→Impl bridge)
+        # Collect all nodes that need further expansion (Impl nodes and non-Interface callees)
+        current_level: list[str] = []
+        for k in callee_map:
+            if k in callee_iface_to_impl:
+                # This is an Interface; expansion happens from its Impl
+                impl_key = callee_iface_to_impl[k]
+                if impl_key in callee_map and impl_key not in current_level:
+                    current_level.append(impl_key)
+            elif k not in callee_iface_to_impl.values():
+                # This is a non-Interface callee that may have its own callees
+                current_level.append(k)
+
         for _depth in range(2, _MAX_DOWNSTREAM_DEPTH + 1):
             if not current_level:
                 break
-            # Batch query: find all children of current level nodes
-            conditions = " OR ".join(
-                f"(source.className = {json.dumps(k.rsplit('.', 1)[0])} AND source.name = {json.dumps(k.rsplit('.', 1)[1])})"
-                for k in current_level
-            )
+
             next_level: list[str] = []
-            rows = store.query(
-                f"MATCH (source:Method)-[r:CodeRelation {{type: 'CALLS'}}]->(child:Method) "
-                f"WHERE {conditions} "
-                f"RETURN source.className AS srcClass, source.name AS srcName, "
-                f"       child.name AS childName, child.className AS childClass"
-            )
-            for r in rows:
-                parent_key = f"{r['srcClass']}.{r['srcName']}"
-                child_key = f"{r['childClass']}.{r['childName']}"
-                if parent_key in callee_map and child_key not in seen:
-                    seen.add(child_key)
-                    new_node: dict[str, Any] = {"name": child_key, "via": "CALLS", "children": []}
-                    callee_map[parent_key]["children"].append(new_node)
-                    callee_map[child_key] = new_node
-                    next_level.append(child_key)
+
+            # Phase 1: Query callees from ALL nodes in current_level
+            all_conds: list[str] = []
+            for k in current_level:
+                cls_part = k.rsplit('.', 1)[0]
+                method_part = k.rsplit('.', 1)[1]
+                all_conds.append(
+                    f"(source.className = {json.dumps(cls_part)} AND source.name = {json.dumps(method_part)})"
+                )
+
+            if all_conds:
+                conditions = " OR ".join(all_conds)
+                rows = store.query(
+                    f"MATCH (source:Method)-[r:CodeRelation {{type: 'CALLS'}}]->(child:Method) "
+                    f"WHERE {conditions} "
+                    f"RETURN source.className AS srcClass, source.name AS srcName, "
+                    f"       child.name AS childName, child.className AS childClass"
+                )
+                for r in rows:
+                    src_key = f"{r['srcClass']}.{r['srcName']}"
+                    if src_key not in current_level:
+                        continue
+                    child_key = f"{r['childClass']}.{r['childName']}"
+                    if src_key in callee_map and child_key not in seen:
+                        seen.add(child_key)
+                        new_node: dict[str, Any] = {"name": child_key, "via": "CALLS", "children": []}
+                        callee_map[src_key]["children"].append(new_node)
+                        callee_map[child_key] = new_node
+
+            # Phase 2: For any Interface node in callee_map that hasn't been resolved,
+            # find Impl and attach Impl's callees as grandchildren
+            iface_nodes_to_resolve = [
+                k for k in current_level
+                if k not in callee_iface_to_impl and k in callee_map
+            ]
+            for iface_key in list(callee_iface_to_impl.keys()) + iface_nodes_to_resolve:
+                if iface_key not in current_level:
+                    continue
+                if iface_key not in callee_map:
+                    continue
+
+                # Check if already has Impl child
+                iface_node = callee_map[iface_key]
+                has_impl_child = any(ch.get("via") == "IMPLEMENTS" for ch in iface_node.get("children", []))
+                if has_impl_child:
+                    continue
+
+                iface_cls = iface_key.rsplit('.', 1)[0]
+                iface_method = iface_key.rsplit('.', 1)[1]
+
+                # Find Impl classes for this Interface
+                iface_impl_rows = store.query(
+                    "MATCH (c:Class)-[r:CodeRelation {type: 'IMPLEMENTS'}]->(i:Interface) "
+                    "WHERE i.name CONTAINS $iface RETURN c.name AS implName LIMIT 5",
+                    {"iface": iface_cls},
+                )
+                for ir in iface_impl_rows:
+                    impl_short = ir["implName"].rsplit(".", 1)[-1]
+                    impl_key = f"{impl_short}.{iface_method}"
+
+                    # Update mapping for future BFS iterations
+                    callee_iface_to_impl[iface_key] = impl_key
+
+                    # Query Impl's callees
+                    impl_callee_rows = store.query(
+                        "MATCH (source:Method)-[r:CodeRelation {type: 'CALLS'}]->(callee:Method) "
+                        "WHERE source.className = $cls AND source.name = $method "
+                        "RETURN callee.name AS calleeName, callee.className AS calleeClass LIMIT 30",
+                        {"cls": impl_short, "method": iface_method},
+                    )
+
+                    # Add Impl node as child of Interface
+                    if impl_key not in seen:
+                        seen.add(impl_key)
+                        impl_node: dict[str, Any] = {"name": impl_key, "via": "IMPLEMENTS", "children": []}
+                        iface_node["children"].append(impl_node)
+                        callee_map[impl_key] = impl_node
+                    else:
+                        impl_node = callee_map.get(impl_key)
+
+                    if impl_node is None:
+                        continue
+
+                    # Add Impl's callees as children of Impl
+                    for ic in impl_callee_rows:
+                        cc_key = f"{ic['calleeClass']}.{ic['calleeName']}"
+                        if cc_key not in seen:
+                            seen.add(cc_key)
+                            cc_node: dict[str, Any] = {"name": cc_key, "via": "CALLS", "children": []}
+                            impl_node["children"].append(cc_node)
+                            callee_map[cc_key] = cc_node
+
+            # Collect next level: non-Interface callees + Impl callees
+            for k in callee_map:
+                # Skip if already processed in current_level
+                if k in current_level:
+                    continue
+                # Include if it's an Impl node or a non-Interface node
+                if k in callee_iface_to_impl.values():
+                    next_level.append(k)
+                elif k not in callee_iface_to_impl:
+                    next_level.append(k)
+
             current_level = next_level
 
         # Expand Mapper → Table by inference (MyBatis mappers have no outgoing CALLS edges)
