@@ -210,6 +210,14 @@ def _install_binary(src: Path, dest_file: Path) -> None:
         current = dest_file.stat().st_mode
         dest_file.chmod(current | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
+    # macOS: remove quarantine attribute to prevent Gatekeeper from killing the process
+    if sys.platform == "darwin":
+        try:
+            subprocess.run(["xattr", "-d", "com.apple.quarantine", str(dest_file)],
+                           capture_output=True)
+        except (FileNotFoundError, OSError):
+            pass
+
     click.echo("")
     _verify_and_report(dest_file)
     click.echo("")
@@ -276,6 +284,14 @@ def _install_from_github(version: str | None, os_name: str, arch: str,
         if sys.platform != "win32":
             current = dest_file.stat().st_mode
             dest_file.chmod(current | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+        # macOS: remove quarantine attribute
+        if sys.platform == "darwin":
+            try:
+                subprocess.run(["xattr", "-d", "com.apple.quarantine", str(dest_file)],
+                               capture_output=True)
+            except (FileNotFoundError, OSError):
+                pass
 
         click.echo(f"  Installed: {dest_file}")
         click.echo("")
