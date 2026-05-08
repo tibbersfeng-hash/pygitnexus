@@ -343,13 +343,16 @@ def _write_to_graph_batched(
         field_defines: list[dict] = []
 
         _seen_class_ids: set[str] = set()
+        _class_base_to_final_id: dict[str, str] = {}  # base ID → deduplicated final ID
         for pf in parsed_files:
             file_id = _make_file_id(pf.file_path)
             for cls in pf.classes:
-                node_id = _make_class_id(cls.name, pf.file_path, cls.start_line, cls.is_interface)
+                base_id = _make_class_id(cls.name, pf.file_path, cls.start_line, cls.is_interface)
+                node_id = base_id
                 if node_id in _seen_class_ids:
                     node_id = f"{node_id}_n{len(_seen_class_ids)}"
                 _seen_class_ids.add(node_id)
+                _class_base_to_final_id[base_id] = node_id
                 class_defines.append({
                     "from_id": file_id,
                     "to_id": node_id,
@@ -470,11 +473,14 @@ def _write_to_graph_batched(
 
             # 5. Write fields — deduplicate by ID
             _seen_field_ids: set[str] = set()
+            _field_base_to_final_id: dict[str, str] = {}
             for field in pf.fields:
-                field_id = _make_field_id(field.name, field.file_path, field.start_line)
+                base_fid = _make_field_id(field.name, field.file_path, field.start_line)
+                field_id = base_fid
                 if field_id in _seen_field_ids:
                     field_id = f"{field_id}_n{len(_seen_field_ids)}"
                 _seen_field_ids.add(field_id)
+                _field_base_to_final_id[base_fid] = field_id
                 field_defines.append({
                     "id": field_id,
                     "name": field.name,
@@ -487,6 +493,16 @@ def _write_to_graph_batched(
                     "isPublic": field.is_public,
                     "from_id": file_id,
                 })
+
+        # Update field_ids map to point to deduplicated final IDs (Bug #5 fix)
+        for key, base_id in list(field_ids.items()):
+            if base_id in _field_base_to_final_id:
+                field_ids[key] = _field_base_to_final_id[base_id]
+
+        # Update class_ids map to point to deduplicated final IDs (Bug #3 fix)
+        for key, base_id in list(class_ids.items()):
+            if base_id in _class_base_to_final_id:
+                class_ids[key] = _class_base_to_final_id[base_id]
 
         bw.insert_nodes("Class", class_nodes)
         bw.insert_nodes("Interface", interface_nodes)
@@ -512,7 +528,8 @@ def _write_to_graph_batched(
             for cls in pf.classes:
                 if not cls.extends:
                     continue
-                node_id = _make_class_id(cls.name, pf.file_path, cls.start_line, cls.is_interface)
+                base_id = _make_class_id(cls.name, pf.file_path, cls.start_line, cls.is_interface)
+                node_id = _class_base_to_final_id.get(base_id, base_id)
                 parent_id = class_id_lookup.get(cls.extends)
                 if not parent_id:
                     continue
@@ -536,7 +553,8 @@ def _write_to_graph_batched(
             for cls in pf.classes:
                 if cls.is_interface:
                     continue
-                node_id = _make_class_id(cls.name, pf.file_path, cls.start_line, cls.is_interface)
+                base_id = _make_class_id(cls.name, pf.file_path, cls.start_line, cls.is_interface)
+                node_id = _class_base_to_final_id.get(base_id, base_id)
                 for iface in cls.implements:
                     # Try exact FQN first, then simple name
                     iface_id = class_id_lookup.get(iface) or simple_name_lookup.get(iface)
@@ -590,11 +608,6 @@ def _write_to_graph_batched(
                         has_setters.append({"from_id": fid, "to_id": mid})
                     elif method.name == getter_name:
                         has_getters.append({"from_id": fid, "to_id": mid})
-                    # Boolean getter: isXxx
-                    elif prop.startswith("is") and len(prop) > 2:
-                        is_getter = f"is{prop[0].upper()}{prop[1:]}" if prop[1:] != prop[1:].lower() else f"is{prop}"
-                        if method.name == is_getter or method.name == f"is{cap}":
-                            has_getters.append({"from_id": fid, "to_id": mid})
         if has_setters:
             bw.insert_typed_relations(
                 "Field", "Method", has_setters, "HAS_SETTER", 1.0,
@@ -608,15 +621,18 @@ def _write_to_graph_batched(
 
         # Insert Constructor nodes — deduplicate by ID
         _seen_ctor_ids: set[str] = set()
+        _ctor_base_to_final_id: dict[str, str] = {}
         ctor_defines: list[dict] = []
         has_constructors: list[dict] = []
         for pf in parsed_files:
             file_id = _make_file_id(pf.file_path)
             for ctor in pf.constructors:
-                cid = _make_constructor_id(ctor.class_name, ctor.name, ctor.file_path, ctor.start_line)
+                base_cid = _make_constructor_id(ctor.class_name, ctor.name, ctor.file_path, ctor.start_line)
+                cid = base_cid
                 if cid in _seen_ctor_ids:
                     cid = f"{cid}_n{len(_seen_ctor_ids)}"
                 _seen_ctor_ids.add(cid)
+                _ctor_base_to_final_id[base_cid] = cid
                 ctor_defines.append({
                     "id": cid,
                     "name": ctor.name,
@@ -633,6 +649,11 @@ def _write_to_graph_batched(
                 cls_node_id = class_simple_lookup.get(ctor.class_name)
                 if cls_node_id and cls_node_id.startswith("Class_"):
                     has_constructors.append({"from_id": cls_node_id, "to_id": cid})
+
+        # Update constructor_ids map to point to deduplicated final IDs (Bug #6 fix)
+        for key, base_id in list(constructor_ids.items()):
+            if base_id in _ctor_base_to_final_id:
+                constructor_ids[key] = _ctor_base_to_final_id[base_id]
 
         bw.insert_nodes_with_defines("Constructor", ctor_defines, "DEFINES")
         if has_constructors:

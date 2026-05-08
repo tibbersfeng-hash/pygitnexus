@@ -201,6 +201,18 @@ def _extract_method_return_type(method_node: ts.Node, source: bytes) -> str:
                 if gc.type == "type_identifier":
                     return _node_text(gc, source)
             break
+        elif child.type == "array_type":
+            # Array type: extract element type + brackets (e.g., String[], int[][])
+            parts: list[str] = []
+            for ac in child.children:
+                if ac.type == "type_identifier":
+                    parts.append(_node_text(ac, source))
+                elif ac.type == "bracketed_type":
+                    # e.g., String[][] has nested brackets
+                    parts.append("[]")
+                elif ac.type == "_type" or ac.type == "integral_type":
+                    parts.append(_node_text(ac, source))
+            return "".join(parts) if parts else "void"
     return "void"
 
 
@@ -313,6 +325,14 @@ def parse(file_path: str, content: bytes) -> ParsedFile:
 
         modifiers_text = _extract_modifiers(iface_node, content)
 
+        # Extract interface extends (Java: interface Foo extends Bar, Baz)
+        # The extends clause appears as type_list child of interface_declaration
+        iface_extends: list[str] = []
+        for iface_child in iface_node.children:
+            if iface_child.type == "type_list":
+                iface_extends = _extract_implements(iface_child, content)
+                break
+
         result.classes.append(ClassDef(
             name=fqn,
             file_path=file_path,
@@ -321,7 +341,7 @@ def parse(file_path: str, content: bytes) -> ParsedFile:
             is_public="public" in modifiers_text,
             is_abstract=False,
             is_interface=True,
-            extends=None,
+            extends=iface_extends[0] if iface_extends else None,
             implements=[],
             content=_get_text(iface_node, content),
         ))
@@ -361,7 +381,7 @@ def parse(file_path: str, content: bytes) -> ParsedFile:
             return_type=return_type,
             parameters=params,
             is_static="static" in modifiers_text,
-            is_public="public" in modifiers_text or "private" not in modifiers_text,
+            is_public="public" in modifiers_text,
             is_constructor=False,
             content=_get_text(method_node, content),
         ))

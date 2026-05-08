@@ -462,21 +462,25 @@ def _resolve_single_call(
         # Only for constructor-like target names
         if is_ctor_call:
             for fqn in simple_to_fqn.get(call.receiver_type, []):
+                # Collect one entry per file to avoid redundant work
+                files_seen: set[str] = set()
                 for key, methods in method_index.items():
                     if key.startswith(f"{fqn}."):
                         for method in methods:
-                            ctor_method = MethodDef(
-                                name=fqn.split(".")[-1],
-                                class_name=fqn,
-                                file_path=method.file_path,
-                                start_line=0,
-                                end_line=0,
-                                return_type="",
-                                is_static=False,
-                                is_public=True,
-                                is_constructor=True,
-                            )
-                            _add(ctor_method, 0.85)
+                            if method.file_path not in files_seen:
+                                files_seen.add(method.file_path)
+                                ctor_method = MethodDef(
+                                    name=fqn.split(".")[-1],
+                                    class_name=fqn,
+                                    file_path=method.file_path,
+                                    start_line=0,
+                                    end_line=0,
+                                    return_type="",
+                                    is_static=False,
+                                    is_public=True,
+                                    is_constructor=True,
+                                )
+                                _add(ctor_method, 0.85)
                 if best:
                     return list(best.values())
 
@@ -580,7 +584,7 @@ def _resolve_single_call(
                     if full_key in method_index:
                         for method in method_index[full_key]:
                             _add(method, 0.45)
-                    break
+                        break
 
             if best:
                 return list(best.values())
@@ -602,7 +606,7 @@ def _resolve_single_call(
                         if full_key in method_index:
                             for method in method_index[full_key]:
                                 _add(method, 0.7)
-                        break
+                            break
             if best:
                 return list(best.values())
 
@@ -655,7 +659,9 @@ def _resolve_single_call(
         # Inheritance: look up parent class methods
         if not best:
             parent = extends_map.get(call.caller_class)
-            while parent and not best:
+            visited_parents: set[str] = set()
+            while parent and parent not in visited_parents and not best:
+                visited_parents.add(parent)
                 parent_key = f"{parent}.{call.target_name}"
                 if parent_key in method_index:
                     for method in method_index[parent_key]:
@@ -667,7 +673,7 @@ def _resolve_single_call(
                         if full_key in method_index:
                             for method in method_index[full_key]:
                                 _add(method, 0.6)
-                        break
+                            break
                 # Walk up further
                 parent = extends_map.get(parent)
 
