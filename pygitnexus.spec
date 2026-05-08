@@ -2,6 +2,7 @@
 """PyInstaller spec for PyGitNexus — onefile mode only."""
 
 import sys
+import platform
 from pathlib import Path
 
 import tree_sitter_html
@@ -116,6 +117,9 @@ a = Analysis(
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 # onefile mode only
+# Disable UPX on macOS — UPX-compressed Mach-O binaries are killed by kernel (SIGKILL 9)
+use_upx = platform.system().lower() != "darwin"
+
 exe = EXE(
     pyz,
     a.scripts,
@@ -126,7 +130,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=use_upx,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=True,
