@@ -833,12 +833,13 @@ def _write_to_graph_batched(
             )
         _step(f"API nodes done ({len(api_nodes)} APIs, {len(exposes_rels)} EXPOSES)")
 
-        # 6. Write CALLS relations (deduplicate by caller_id + target_id)
+        # 6. Write CALLS relations (deduplicate by caller_id + target_id, keep highest confidence)
         _step("Starting CALLS relations...")
 
-        # Caller can be Method or Constructor; target can be Method, Constructor, or Class
-        calls_by_tables: dict[tuple[str, str], list[dict]] = {}
-        seen_calls: set[tuple[str, str]] = set()
+        # First pass: resolve IDs and keep best confidence per (caller_id, target_id) pair
+        best_confidence: dict[tuple[str, str], float] = {}
+        best_rel_data: dict[tuple[str, str], tuple[str, str, dict]] = {}  # pair -> (caller_tbl, target_tbl, rel_data)
+
         for item in call_relations:
             # Handle both 5-tuple (Java: caller, file, target, file, confidence)
             # and 8-tuple (JS/TS: + http_method, http_path, http_params)
@@ -869,8 +870,9 @@ def _write_to_graph_batched(
                 continue
 
             pair = (caller_id, target_id)
-            if pair not in seen_calls:
-                seen_calls.add(pair)
+            # Keep the highest confidence for each (caller, target) pair
+            if confidence > best_confidence.get(pair, -1):
+                best_confidence[pair] = confidence
                 rel_data: dict = {
                     "from_id": caller_id,
                     "to_id": target_id,
@@ -882,7 +884,13 @@ def _write_to_graph_batched(
                     rel_data["httpPath"] = http_path
                 if http_params:
                     rel_data["httpParams"] = http_params
-                calls_by_tables.setdefault((caller_table, target_table), []).append(rel_data)
+                best_rel_data[pair] = (caller_table, target_table, rel_data)
+
+        # Group best data by (caller_table, target_table) for bulk write
+        calls_by_tables: dict[tuple[str, str], list[dict]] = {}
+        for pair, (caller_table, target_table, rel_data) in best_rel_data.items():
+            calls_by_tables.setdefault((caller_table, target_table), []).append(rel_data)
+
         for (from_table, to_table), data in calls_by_tables.items():
             # Always include all HTTP columns since schema has them
             store.bulk_copy_relations(

@@ -36,3 +36,6 @@ build = [
     "pyinstaller>=6.0",
     "nuitka>=2.0",
 ]
+dev = [
+    "pytest>=9.0.3",
+]

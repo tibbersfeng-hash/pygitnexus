@@ -18,13 +18,66 @@ from .models import (
 _CAMEL_SPLIT_RE = re.compile(r"[A-Z]?[a-z]+|[A-Z]+(?=[A-Z]|$)")
 
 
+def _is_test_file(file_path: str) -> bool:
+    """Check if a file path belongs to test source code.
+
+    Test classes should not participate in production call analysis because:
+    - Their methods are only invoked by test frameworks, not production code.
+    - They often reference internal APIs in ways that create false CALLS edges.
+    """
+    path = file_path.replace("\\", "/")
+    # Check for test source roots
+    test_indicators = ["/src/test/", "\\src\\test\\", "/test/", "/t/"]
+    if any(ind in path for ind in test_indicators):
+        return True
+    # Check for test-like class names in filename
+    stem = Path(file_path).stem
+    if stem.endswith("Test") or stem.endswith("Tests") or stem.endswith("TestCase"):
+        return True
+    return False
+
+
+# Common suffixes that appear in many class names but carry no semantic meaning
+# for similarity matching. Without these, _names_related matches every Entity
+# with every other Entity, every VO with every VO, etc.
+_COMMON_SUFFIXES: set[str] = {
+    "Entity", "VO", "DTO", "Bean", "Model", "Impl", "Service", "Request",
+    "Response", "Data", "Info", "Form", "Query", "Param", "Params", "Config",
+    "Mapper", "Dao", "Daoimpl", "Controller", "Handler", "Adapter", "Manager",
+    "Builder", "Factory", "Provider", "Wrapper", "Decorator", "Proxy",
+    "Exception", "Error", "Event", "Listener", "Observer", "Subscriber",
+    "Record", "Value", "Item", "Node", "Element",
+}
+
+# Stop words that are too generic to indicate a meaningful relationship.
+_NAME_STOPWORDS: set[str] = {"get", "set", "is", "the", "of", "and"}
+
+
 @functools.lru_cache(maxsize=8192)
 def _names_related(a: str, b: str) -> bool:
-    """Check if two type names are plausibly related by shared word tokens."""
+    """Check if two type names are plausibly related by shared word tokens.
+
+    Excludes both generic stop words and common class-name suffixes so that
+    e.g. I18nSearchEntity does NOT match BizModelEntity just because both
+    contain "Entity".
+    """
     a_words = set(_CAMEL_SPLIT_RE.findall(a))
     b_words = set(_CAMEL_SPLIT_RE.findall(b))
-    shared = a_words & b_words - {"get", "set", "is", "the", "of", "and"}
+    shared = a_words & b_words - _NAME_STOPWORDS - _COMMON_SUFFIXES
     return bool(shared)
+
+
+@functools.lru_cache(maxsize=8192)
+def _names_strongly_related(a: str, b: str) -> bool:
+    """Stricter version of _names_related: requires 2+ meaningful shared tokens.
+
+    Used in fallback matching to prevent DTO/getter explosion where a single
+    shared word (e.g. "Language") matches hundreds of unrelated classes.
+    """
+    a_words = set(_CAMEL_SPLIT_RE.findall(a))
+    b_words = set(_CAMEL_SPLIT_RE.findall(b))
+    shared = a_words & b_words - _NAME_STOPWORDS - _COMMON_SUFFIXES
+    return len(shared) >= 2
 
 
 # Methods from test framework static imports that should be matched globally.
@@ -195,9 +248,10 @@ def resolve_calls_chunk_with_indices(
         simple = fqn.rsplit(".", 1)[-1]
         simple_to_fqn.setdefault(simple, []).append(fqn)
 
-    # Resolve only calls in this chunk
+    # Resolve only calls in this chunk — skip test files
     resolved: list[tuple[str, str, str, str, float]] = []
-    for pf in chunk:
+    chunk_production = [pf for pf in chunk if not _is_test_file(pf.file_path)]
+    for pf in chunk_production:
         for call in pf.calls:
             target_methods = _resolve_single_call(
                 call, method_index, method_name_index, class_map, constructor_index,
@@ -213,6 +267,29 @@ def resolve_calls_chunk_with_indices(
                     confidence,
                 ))
 
+    # Post-process: propagate interface CALLS to implementing classes
+    if implement_map:
+        new_resolved: list[tuple[str, str, str, str, float]] = []
+        for caller, caller_file, target_name, target_file, confidence in resolved:
+            new_resolved.append((caller, caller_file, target_name, target_file, confidence))
+            for iface_fqn in interface_set:
+                iface_key = f"{iface_fqn}.{target_name}"
+                if iface_key in method_index:
+                    for iface_method in method_index[iface_key]:
+                        if iface_method.file_path == target_file and iface_method.name == target_name:
+                            for impl_fqn in implement_map.get(iface_fqn, []):
+                                impl_key = f"{impl_fqn}.{target_name}"
+                                if impl_key in method_index:
+                                    for impl_method in method_index[impl_key]:
+                                        new_resolved.append((
+                                            caller, caller_file,
+                                            impl_method.name,
+                                            impl_method.file_path,
+                                            0.65,
+                                        ))
+                            break
+        resolved = new_resolved
+
     return resolved
 
 
@@ -225,6 +302,10 @@ def resolve_calls(
     Returns list of (caller_method_name, caller_file_path,
                      target_method_name, target_file_path, confidence).
     """
+    # Filter out test files — their methods should not participate in
+    # production call analysis.
+    production_files = [pf for pf in parsed_files if not _is_test_file(pf.file_path)]
+
     resolved: list[tuple[str, str, str, str, float]] = []
 
     # Build method index: class_name.method_name -> list of MethodDef
@@ -305,8 +386,8 @@ def resolve_calls(
         simple = fqn.rsplit(".", 1)[-1]
         simple_to_fqn.setdefault(simple, []).append(fqn)
 
-    # Resolve each call site
-    for pf in parsed_files:
+    # Resolve each call site — only from production files (skip test classes)
+    for pf in production_files:
         for call in pf.calls:
             target_methods = _resolve_single_call(
                 call, method_index, method_name_index, class_map, constructor_index,
@@ -321,6 +402,33 @@ def resolve_calls(
                     target_method.file_path,
                     confidence,
                 ))
+
+    # Post-process: propagate interface CALLS to implementing classes.
+    # In Spring DI, controllers call interface methods but the runtime
+    # dispatches to the implementation. Add CALLS edges from the same
+    # caller to each implementing method.
+    if implement_map:
+        new_resolved: list[tuple[str, str, str, str, float]] = []
+        for caller, caller_file, target_name, target_file, confidence in resolved:
+            new_resolved.append((caller, caller_file, target_name, target_file, confidence))
+            # Check if target method's class is an interface
+            for iface_fqn in interface_set:
+                iface_key = f"{iface_fqn}.{target_name}"
+                if iface_key in method_index:
+                    for iface_method in method_index[iface_key]:
+                        if iface_method.file_path == target_file and iface_method.name == target_name:
+                            for impl_fqn in implement_map.get(iface_fqn, []):
+                                impl_key = f"{impl_fqn}.{target_name}"
+                                if impl_key in method_index:
+                                    for impl_method in method_index[impl_key]:
+                                        new_resolved.append((
+                                            caller, caller_file,
+                                            impl_method.name,
+                                            impl_method.file_path,
+                                            0.65,
+                                        ))
+                            break
+        resolved = new_resolved
 
     return resolved
 
@@ -558,9 +666,12 @@ def _resolve_single_call(
         if target in _COMMON_JDK_METHODS:
             return list(best.values())
 
-        # Use method_name_index for O(1) lookup instead of iterating all methods
+        # Use method_name_index for O(1) lookup instead of iterating all methods.
+        # Require 2+ meaningful shared tokens to avoid DTO/getter explosion where
+        # a single shared word (e.g. "Language", "Entity") matches hundreds of
+        # unrelated classes.
         for class_base, method in method_name_index.get(target, []):
-            if _names_related(rt_base, class_base):
+            if _names_strongly_related(rt_base, class_base):
                 _add(method, 0.5)
         return list(best.values())
 
@@ -643,9 +754,12 @@ def _resolve_single_call(
             if call.target_name in _COMMON_JDK_METHODS:
                 return list(best.values())
 
-            # Use method_name_index for O(1) lookup
+            # Use method_name_index for O(1) lookup, but restrict to classes
+            # whose name is meaningfully related to the receiver class.
+            receiver_base = call.receiver.split(".")[-1]
             for class_base, method in method_name_index.get(call.target_name, []):
-                _add(method, 0.5)
+                if _names_strongly_related(receiver_base, class_base):
+                    _add(method, 0.5)
         return list(best.values())
 
     # Strategy 3: no receiver (same-class call like "this.method()" or bare "method()")
