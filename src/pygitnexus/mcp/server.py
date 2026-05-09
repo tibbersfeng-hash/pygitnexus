@@ -304,7 +304,7 @@ def create_server() -> FastMCP:
             limit: Max results to return (default: 20)
             repo: Repository name or path. Omit if only one repo is indexed.
         """
-        store, _ = _load_store(repo)
+        store, repo_root = _load_store(repo)
         if store is None:
             return f"Error: No indexed repository found{' for ' + repo if repo else ''}."
         try:
@@ -314,31 +314,92 @@ def create_server() -> FastMCP:
         if not results:
             return f"No symbols found matching '{query}'."
 
+        # ── Step 1: separate Method nodes from other symbols ──
+        method_rows: list[dict] = []
+        non_methods: list[dict] = []
+        for row in results:
+            types_raw = row.get("types", "")
+            if isinstance(types_raw, dict) and "Method" in types_raw:
+                method_rows.append(row)
+            else:
+                non_methods.append(row)
+
+        # ── Step 2: structural analysis — outgoing CALLS + parameterCount ──
+        method_ids = [r.get("id", "") for r in method_rows if r.get("id")]
+        methods_with_calls: set[str] = set()
+        method_param_counts: dict[str, int] = {}
+
+        if method_ids:
+            db_path, _ = _resolve_db_path(repo)
+            if db_path:
+                temp_store = GraphStore(db_path)
+                try:
+                    # Which methods have outgoing CALLS edges
+                    id_list = ", ".join(
+                        f"'{fid.replace(chr(39), chr(39)+chr(39))}'" for fid in method_ids
+                    )
+                    callees = temp_store.query(
+                        f"MATCH (m:Method)-[r:CodeRelation {{type: 'CALLS'}}]->(t) "
+                        f"WHERE m.id IN [{id_list}] "
+                        f"RETURN DISTINCT m.id AS method_id"
+                    )
+                    methods_with_calls = {c["method_id"] for c in callees if c.get("method_id")}
+
+                    # Get parameterCount for all methods in results
+                    param_rows = temp_store.query(
+                        f"MATCH (m:Method) WHERE m.id IN [{id_list}] "
+                        f"RETURN m.id AS method_id, m.parameterCount AS paramCount"
+                    )
+                    for p in param_rows:
+                        mid = p.get("method_id", "")
+                        pc = p.get("paramCount")
+                        if mid and pc is not None:
+                            method_param_counts[mid] = int(pc)
+                except Exception:
+                    pass  # structural query failure → fallback to naming only
+                finally:
+                    temp_store.close()
+
+        # ── Step 3: classify ──
+        # Accessor = naming match AND no outgoing CALLS AND parameterCount <= 1
         import re as _re
-        # Match simple JavaBean accessors: getFoo, setFoo, isFoo
-        # Exclude compound names like getOrCreate, getOrDefault (getOr/getAnd pattern)
         _ACCESSOR_RE = _re.compile(
             r"^(get|set|is)(?!Or|And)[A-Z][a-zA-Z0-9]*$"
         )
 
-        def _is_accessor(name: str) -> bool:
+        def _looks_like_accessor(name: str) -> bool:
             return bool(_ACCESSOR_RE.match(name))
 
-        # Separate accessor methods from other symbols
         accessors: list[dict] = []
-        others: list[dict] = []
-        for row in results:
-            types_raw = row.get("types", "")
-            is_method = isinstance(types_raw, dict) and "Method" in types_raw
-            if is_method and _is_accessor(row.get("name", "")):
-                accessors.append(row)
-            else:
-                others.append(row)
+        other_methods: list[dict] = []
+        for row in method_rows:
+            sym_id = row.get("id", "")
+            name = row.get("name", "")
 
+            # Rule 1: has outgoing CALLS → definitely not a pure accessor
+            if sym_id in methods_with_calls:
+                other_methods.append(row)
+                continue
+
+            # Rule 2: naming doesn't match → not an accessor
+            if not _looks_like_accessor(name):
+                other_methods.append(row)
+                continue
+
+            # Rule 3: parameterCount > 1 → not a simple getter/setter
+            param_count = method_param_counts.get(sym_id, -1)
+            if param_count > 1:
+                other_methods.append(row)
+                continue
+
+            # All checks passed → pure accessor
+            accessors.append(row)
+
+        # ── Step 4: format output ──
         lines = [f"Found {len(results)} symbol(s) matching '{query}':\n"]
 
-        # Show non-accessor symbols first
-        for row in others:
+        # Non-method nodes first
+        for row in non_methods:
             types = row.get("types", "unknown")
             name = row.get("name", "")
             path = row.get("filePath", "")
@@ -347,7 +408,17 @@ def create_server() -> FastMCP:
             lines.append(f"  [{types}] {name}")
             lines.append(f"    {path}{line_str}")
 
-        # Summarize accessor methods in a compact line
+        # Non-accessor methods
+        for row in other_methods:
+            types = row.get("types", "unknown")
+            name = row.get("name", "")
+            path = row.get("filePath", "")
+            line_num = row.get("startLine", "")
+            line_str = f":{line_num}" if line_num else ""
+            lines.append(f"  [{types}] {name}")
+            lines.append(f"    {path}{line_str}")
+
+        # Summarize pure accessor methods
         if accessors:
             accessor_names = [r.get("name", "") for r in accessors]
             lines.append(f"\n  Accessor methods ({len(accessors)}): {', '.join(accessor_names)}")
