@@ -10,11 +10,12 @@ def query(store: GraphStore, keyword: str, limit: int = 20) -> list[dict]:
 
     Supports compound names like 'ClassName.methodName' — splits on '.'
     and matches className and name separately.
-    Returns id field for structural lookups (e.g., accessor detection).
+    Returns id, parameterCount, and hasCalls fields for accessor detection.
     """
     columns = (
         "n.id as id, labels(n) as types, n.name as name, n.className as className, "
-        "n.filePath as filePath, n.startLine as startLine"
+        "n.filePath as filePath, n.startLine as startLine, "
+        "n.parameterCount as parameterCount"
     )
     # Check if keyword looks like a compound name (e.g., "MallUser.setLoginName")
     if "." in keyword:
@@ -33,6 +34,27 @@ def query(store: GraphStore, keyword: str, limit: int = 20) -> list[dict]:
         "LIMIT $limit",
         {"name": keyword, "limit": limit},
     )
+
+
+def query_methods_with_calls(store: GraphStore, method_ids: list[str]) -> set[str]:
+    """Batch-check which methods have outgoing CALLS edges.
+
+    Returns a set of method IDs that have at least one CALLS edge.
+    """
+    if not method_ids:
+        return set()
+    id_list = ", ".join(
+        f"'{fid.replace(chr(39), chr(39)+chr(39))}'" for fid in method_ids
+    )
+    try:
+        rows = store.query(
+            f"MATCH (m:Method)-[r:CodeRelation {{type: 'CALLS'}}]->(t) "
+            f"WHERE m.id IN [{id_list}] "
+            f"RETURN DISTINCT m.id AS method_id"
+        )
+        return {r["method_id"] for r in rows if r.get("method_id")}
+    except Exception:
+        return set()
 
 
 def symbol_context(store: GraphStore, name: str, max_depth: int = 30) -> dict:
