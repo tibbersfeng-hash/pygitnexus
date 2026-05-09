@@ -331,7 +331,9 @@ def create_server() -> FastMCP:
             non_methods: list[dict] = []
             for row in results:
                 types_raw = row.get("types", "")
-                if not isinstance(types_raw, dict) or "Method" not in types_raw:
+                # labels(n) returns a string (e.g., 'Method') or dict depending on Kuzu version
+                is_method = "Method" in str(types_raw)
+                if not is_method:
                     non_methods.append(row)
                     continue
 
