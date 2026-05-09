@@ -313,8 +313,32 @@ def create_server() -> FastMCP:
             store.close()
         if not results:
             return f"No symbols found matching '{query}'."
-        lines = [f"Found {len(results)} symbol(s) matching '{query}':\n"]
+
+        import re as _re
+        # Match simple JavaBean accessors: getFoo, setFoo, isFoo
+        # Exclude compound names like getOrCreate, getOrDefault (getOr/getAnd pattern)
+        _ACCESSOR_RE = _re.compile(
+            r"^(get|set|is)(?!Or|And)[A-Z][a-zA-Z0-9]*$"
+        )
+
+        def _is_accessor(name: str) -> bool:
+            return bool(_ACCESSOR_RE.match(name))
+
+        # Separate accessor methods from other symbols
+        accessors: list[dict] = []
+        others: list[dict] = []
         for row in results:
+            types_raw = row.get("types", "")
+            is_method = isinstance(types_raw, dict) and "Method" in types_raw
+            if is_method and _is_accessor(row.get("name", "")):
+                accessors.append(row)
+            else:
+                others.append(row)
+
+        lines = [f"Found {len(results)} symbol(s) matching '{query}':\n"]
+
+        # Show non-accessor symbols first
+        for row in others:
             types = row.get("types", "unknown")
             name = row.get("name", "")
             path = row.get("filePath", "")
@@ -322,6 +346,12 @@ def create_server() -> FastMCP:
             line_str = f":{line_num}" if line_num else ""
             lines.append(f"  [{types}] {name}")
             lines.append(f"    {path}{line_str}")
+
+        # Summarize accessor methods in a compact line
+        if accessors:
+            accessor_names = [r.get("name", "") for r in accessors]
+            lines.append(f"\n  Accessor methods ({len(accessors)}): {', '.join(accessor_names)}")
+
         return "\n".join(lines)
 
     @mcp.tool()
