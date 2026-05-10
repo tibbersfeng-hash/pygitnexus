@@ -29,8 +29,6 @@ from pygitnexus.cli.setup import (
     skill_cmd,
     CONFIG_DIR,
     USER_CONFIG,
-    USER_MCP,
-    USER_HOOKS,
     SKILLS_DIR,
     _resolve_binary_path,
     _read_json,
@@ -51,8 +49,6 @@ def isolated_config(tmp_path: Path, monkeypatch):
     """Redirect all config paths to a temporary directory."""
     monkeypatch.setattr("pygitnexus.cli.setup.CONFIG_DIR", tmp_path)
     monkeypatch.setattr("pygitnexus.cli.setup.USER_CONFIG", tmp_path / "config.json")
-    monkeypatch.setattr("pygitnexus.cli.setup.USER_MCP", tmp_path / "mcp.json")
-    monkeypatch.setattr("pygitnexus.cli.setup.USER_HOOKS", tmp_path / "hooks.json")
     monkeypatch.setattr("pygitnexus.cli.setup.SKILLS_DIR", tmp_path / "skills")
     return tmp_path
 
@@ -97,10 +93,11 @@ class TestReadJson:
         f.write_text('{"path": "/usr/bin"}', encoding="utf-8")
         assert _read_json(f) == {"path": "/usr/bin"}
 
-    def test_invalid_json_returns_none(self, tmp_path):
+    def test_invalid_json_raises_value_error(self, tmp_path):
         f = tmp_path / "e.json"
         f.write_text('{broken}', encoding="utf-8")
-        assert _read_json(f) is None
+        with pytest.raises(ValueError, match="Invalid JSON"):
+            _read_json(f)
 
     def test_missing_file(self, tmp_path):
         assert _read_json(tmp_path / "nonexistent.json") is None
@@ -160,7 +157,7 @@ class TestSetupAutoDeleteThenAdd:
     """Test the core setup flow: delete existing config → run setup → verify it adds back.
 
     All tests use isolated_filesystem to avoid modifying real user config files.
-    Editor directories are simulated via _dir_exists mocking.
+    Editor directories are simulated via Path.is_dir mocking.
     """
 
     def test_cursor_delete_then_setup_adds(self, runner, isolated_config, fake_bin):
@@ -210,28 +207,34 @@ class TestSetupAutoDeleteThenAdd:
                 mcp_path.unlink()
 
     def test_claude_code_delete_then_setup_adds(self, runner, isolated_config, fake_bin):
-        """Delete pygitnexus from Claude Code, run setup, verify it's back."""
-        claude_json = Path.home() / ".claude.json"
+        """Delete pygitnexus from Claude Code, run setup, verify it's back.
+
+        Claude Code MCP config is written to ~/.claude/settings.json (user config),
+        NOT ~/.claude.json (internal state file).
+        """
+        claude_settings = Path.home() / ".claude" / "settings.json"
+        if not claude_settings.parent.is_dir():
+            pytest.skip("Claude Code not installed")
 
         # Backup existing config
         backup = None
-        if claude_json.exists():
-            backup = claude_json.read_text(encoding="utf-8")
+        if claude_settings.exists():
+            backup = claude_settings.read_text(encoding="utf-8")
 
         try:
             # Step 1: Write pre-existing config with pygitnexus
             existing = {"mcpServers": {"pygitnexus": {"command": "/old/path", "args": ["mcp"]}}}
-            _write_json(claude_json, existing)
+            _write_json(claude_settings, existing)
 
             # Step 2: Delete existing config
-            data = _read_json(claude_json) or {}
+            data = _read_json(claude_settings) or {}
             servers = data.get("mcpServers", {})
             if "pygitnexus" in servers:
                 del servers["pygitnexus"]
-                _write_json(claude_json, data)
+                _write_json(claude_settings, data)
 
             # Step 3: Verify it's gone
-            data = _read_json(claude_json)
+            data = _read_json(claude_settings)
             assert "pygitnexus" not in (data or {}).get("mcpServers", {})
 
             # Step 4: Run setup
@@ -239,16 +242,17 @@ class TestSetupAutoDeleteThenAdd:
                 result = runner.invoke(setup_cmd, [])
             assert result.exit_code == 0
 
-            # Step 5: Verify it's back
-            data = _read_json(claude_json)
+            # Step 5: Verify it's back in ~/.claude/settings.json
+            data = _read_json(claude_settings)
             assert "pygitnexus" in (data or {}).get("mcpServers", {})
             entry = (data or {}).get("mcpServers", {}).get("pygitnexus", {})
             assert entry.get("command") == fake_bin
+            assert entry.get("args") == ["mcp"]
         finally:
             if backup is not None:
-                claude_json.write_text(backup, encoding="utf-8")
-            elif claude_json.exists():
-                claude_json.unlink()
+                claude_settings.write_text(backup, encoding="utf-8")
+            elif claude_settings.exists():
+                claude_settings.unlink()
 
     def test_auto_no_binary_error(self, runner, isolated_config):
         """When binary can't be resolved, should error."""
@@ -260,7 +264,7 @@ class TestSetupAutoDeleteThenAdd:
     def test_auto_skips_when_editors_not_installed(self, runner, isolated_config, fake_bin):
         """Editors without installed dir should be skipped."""
         with patch("pygitnexus.cli.setup._resolve_binary_path", return_value=fake_bin), \
-             patch("pygitnexus.cli.setup._dir_exists", return_value=False):
+             patch.object(Path, "is_dir", return_value=False):
             result = runner.invoke(setup_cmd, [])
             assert result.exit_code == 0
             assert "Skipped" in result.output or "not installed" in result.output
@@ -323,8 +327,8 @@ class TestCodeBuddyMcpJson:
         if mcp_path.exists():
             backup = mcp_path.read_text(encoding="utf-8")
 
-        def _dir_exists_mock(path):
-            return str(path).startswith(str(codebuddy_dir))
+        def _is_dir_mock(self):
+            return str(self).startswith(str(codebuddy_dir))
 
         try:
             # Delete existing config
@@ -337,7 +341,7 @@ class TestCodeBuddyMcpJson:
 
             # Run setup
             with patch("pygitnexus.cli.setup._resolve_binary_path", return_value=fake_bin), \
-                 patch("pygitnexus.cli.setup._dir_exists", side_effect=_dir_exists_mock):
+                 patch.object(Path, "is_dir", _is_dir_mock):
                 result = runner.invoke(setup_cmd, [])
             assert result.exit_code == 0
 
@@ -388,10 +392,10 @@ class TestCodeBuddyHooks:
     """Test that setup auto writes hooks config to CodeBuddy settings.json."""
 
     def _only_codebuddy(self, codebuddy_dir):
-        """_dir_exists mock that only recognizes CodeBuddy."""
+        """Path.is_dir mock that only recognizes CodeBuddy directory."""
         cb = str(codebuddy_dir)
-        def _mock(path):
-            return str(path).startswith(cb)
+        def _mock(self):
+            return str(self).startswith(cb)
         return _mock
 
     def test_setup_auto_writes_hooks(self, runner, isolated_config, fake_bin):
@@ -422,7 +426,7 @@ class TestCodeBuddyHooks:
 
             # Run setup auto — only CodeBuddy dir is recognized, avoiding writes to Cursor/Claude
             with patch("pygitnexus.cli.setup._resolve_binary_path", return_value=fake_bin), \
-                 patch("pygitnexus.cli.setup._dir_exists", side_effect=self._only_codebuddy(codebuddy_dir)):
+                 patch.object(Path, "is_dir", self._only_codebuddy(codebuddy_dir)):
                 result = runner.invoke(setup_cmd, [])
                 assert result.exit_code == 0
 
@@ -512,7 +516,7 @@ class TestCodeBuddyHooks:
 
             # Run setup auto twice — only CodeBuddy dir is recognized
             with patch("pygitnexus.cli.setup._resolve_binary_path", return_value=fake_bin), \
-                 patch("pygitnexus.cli.setup._dir_exists", side_effect=self._only_codebuddy(codebuddy_dir)):
+                 patch.object(Path, "is_dir", self._only_codebuddy(codebuddy_dir)):
                 runner.invoke(setup_cmd, [])
                 runner.invoke(setup_cmd, [])
 

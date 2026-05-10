@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
@@ -16,8 +15,6 @@ import click
 
 CONFIG_DIR = Path.home() / ".pygitnexus"
 USER_CONFIG = CONFIG_DIR / "config.json"
-USER_MCP = CONFIG_DIR / "mcp.json"
-USER_HOOKS = CONFIG_DIR / "hooks.json"
 SKILLS_DIR = CONFIG_DIR / "skills"
 
 
@@ -30,15 +27,22 @@ def _resolve_binary_path() -> str | None:
     which_exe = shutil.which("pygitnexus.exe")
     if which_exe:
         return os.path.abspath(which_exe)
-    # Method 2: sys.argv[0] (works for single-file binary)
+    # Method 2: sys.argv[0] (works for single-file binary or python -m)
     argv0 = os.path.abspath(sys.argv[0])
     base = os.path.basename(argv0)
-    if base in ("pygitnexus", "pygitnexus.exe"):
+    if base in ("pygitnexus", "pygitnexus.exe", "__main__.py"):
         return argv0
     return None
 
 
 def _read_json(path: Path) -> dict | None:
+    """Read JSON file, stripping JSONC-style comments.
+
+    Returns parsed dict, or None if file doesn't exist.
+    Raises ValueError if file exists but contains invalid JSON.
+    """
+    if not path.is_file():
+        return None
     try:
         text = path.read_text(encoding="utf-8")
         lines = text.splitlines()
@@ -61,6 +65,8 @@ def _read_json(path: Path) -> dict | None:
             clean_lines.append(line)
         cleaned = "\n".join(clean_lines)
         return json.loads(cleaned)
+    except json.JSONDecodeError:
+        raise ValueError(f"Invalid JSON in {path}")
     except Exception:
         return None
 
@@ -124,6 +130,8 @@ def mcp_add(name: str, command: str, args: tuple[str, ...], env: tuple[str, ...]
     if description:
         entry["description"] = description
 
+    if name in mcp_servers:
+        click.echo(f"  MCP Server '{name}' already exists, updating.")
     mcp_servers[name] = entry
     _save_config(config)
     click.echo(f"  MCP Server '{name}' added successfully.")
@@ -197,7 +205,7 @@ def _export_to_editor(mcp_servers: dict, editor: str) -> None:
             "mcpServers": {**existing.get("mcpServers", {}), **mcp_servers}
         })
     elif editor == "claude-code":
-        path = Path.home() / ".claude.json"
+        path = Path.home() / ".claude" / "settings.json"
         _merge_mcp_json(path, lambda existing: {
             **existing,
             "mcpServers": {**existing.get("mcpServers", {}), **mcp_servers}
@@ -230,9 +238,9 @@ def _export_to_editor(mcp_servers: dict, editor: str) -> None:
             section_key = f"[mcp_servers.{name}]"
             if section_key in existing:
                 continue
-            cmd = entry["command"]
+            cmd = entry["command"].replace("\\", "\\\\").replace('"', '\\"')
             args = " ".join(f'"{a}"' for a in entry.get("args", []))
-            sections.append(f"{section_key}\ncommand = \"{cmd}\"\nargs = [{args}]\n")
+            sections.append(f'{section_key}\ncommand = "{cmd}"\nargs = [{args}]\n')
         if sections:
             content = f"{existing.strip()}\n\n" + "\n".join(sections) if existing.strip() else "\n".join(sections)
             config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -342,7 +350,10 @@ def hook_remove(event: str, index: int) -> None:
     hooks = config.get("hooks", {})
     event_list = hooks.get(event, [])
     if not event_list or index < 0 or index >= len(event_list):
-        click.echo(f"  No hook at {event}[{index}].")
+        if event not in hooks:
+            click.echo(f"  No hooks configured for '{event}'. Use 'hook list' to see available events.")
+        else:
+            click.echo(f"  No hook at {event}[{index}]. Use 'hook list {event}' to see valid indices.")
         return
     removed = event_list.pop(index)
     if not event_list:
@@ -353,6 +364,7 @@ def hook_remove(event: str, index: int) -> None:
 
 
 def _sample_hooks() -> dict:
+    """Sample hook configs. Paths point to placeholders — users must create actual scripts."""
     return {
         "SessionStart": [
             {
@@ -439,18 +451,22 @@ def skill_init(name: str, description: str, project: bool) -> None:
     (base / "references").mkdir(exist_ok=True)
     (base / "assets").mkdir(exist_ok=True)
 
+    # Sanitize inputs for YAML frontmatter safety
+    safe_name = name.replace("\n", " ").replace(":", "")
+    safe_desc = description.replace("\n", " ").replace("---", "")
+
     skill_md = f"""---
-name: {name}
-description: {description}
+name: {safe_name}
+description: {safe_desc}
 ---
 
-# {name}
+# {safe_name}
 
 <!-- Add your skill instructions here -->
 
 ## Overview
 
-{description}
+{safe_desc}
 
 ## Usage
 
@@ -567,9 +583,6 @@ def _read_skill_description(skill_md_path: Path) -> str:
 
 # ─── Main setup command (legacy: auto-configure all editors) ───────
 
-def _dir_exists(path: Path) -> bool:
-    return path.is_dir()
-
 
 def _get_mcp_entry(bin_path: str) -> dict:
     return {"command": bin_path, "args": ["mcp"]}
@@ -580,6 +593,9 @@ def _get_opencode_mcp_entry(bin_path: str) -> dict:
 
 
 def _merge_jsonc_like(path: Path, key_path: list[str], value: dict) -> bool:
+    """Merge a value into a nested JSON path. Returns True if value changed, False if already equal."""
+    if not key_path:
+        return False
     existing = _read_json(path)
     if existing is None:
         existing = {}
@@ -588,6 +604,11 @@ def _merge_jsonc_like(path: Path, key_path: list[str], value: dict) -> bool:
         if key not in obj:
             obj[key] = {}
         obj = obj[key]
+
+    # Skip write if value is identical
+    if obj.get(key_path[-1]) == value:
+        return False
+
     obj[key_path[-1]] = value
     _write_json(path, existing)
     return True
@@ -595,7 +616,7 @@ def _merge_jsonc_like(path: Path, key_path: list[str], value: dict) -> bool:
 
 def _setup_cursor(result: dict, bin_path: str) -> None:
     cursor_dir = Path.home() / ".cursor"
-    if not _dir_exists(cursor_dir):
+    if not cursor_dir.is_dir():
         result["skipped"].append("Cursor (not installed)")
         return
     mcp_path = cursor_dir / "mcp.json"
@@ -608,30 +629,92 @@ def _setup_cursor(result: dict, bin_path: str) -> None:
 
 
 def _setup_claude_code(result: dict, bin_path: str) -> None:
-    claude_dir = Path.home() / ".claude"
-    if not _dir_exists(claude_dir):
+    """Configure Claude Code user-level MCP + Hooks."""
+    # Detection: check both settings.json existence and claude binary
+    settings_path = Path.home() / ".claude" / "settings.json"
+    claude_installed = (
+        settings_path.is_file()
+        or shutil.which("claude") is not None
+        or shutil.which("claude.exe") is not None
+    )
+    if not claude_installed:
         result["skipped"].append("Claude Code (not installed)")
         return
-    mcp_path = Path.home() / ".claude.json"
+
+    # --- MCP configuration ---
     try:
-        ok = _merge_jsonc_like(mcp_path, ["mcpServers", "pygitnexus"], _get_mcp_entry(bin_path))
+        ok = _merge_jsonc_like(settings_path, ["mcpServers", "pygitnexus"],
+                               _get_mcp_entry(bin_path))
         if ok:
-            result["configured"].append("Claude Code")
+            result["configured"].append("Claude Code (MCP)")
     except Exception as e:
-        result["errors"].append(f"Claude Code: {e}")
+        result["errors"].append(f"Claude Code MCP: {e}")
+
+    # --- Hook configuration ---
+    hook_dir = Path.home() / ".claude" / "hooks" / "pygitnexus"
+    hook_script = hook_dir / _HOOK_TEMPLATE
+
+    # Extract hook script from bundled source if not already present
+    if not hook_script.is_file():
+        try:
+            extracted = _extract_hook_script(hook_dir, bin_path)
+            if extracted:
+                hook_script = extracted
+        except Exception as e:
+            result["errors"].append(f"Claude Code hook extract: {e}")
+
+    if hook_script.is_file():
+        try:
+            # Safe read: if file exists but is invalid JSON, don't overwrite
+            if settings_path.is_file():
+                settings_data = _read_json(settings_path)
+                if settings_data is None:
+                    result["errors"].append(f"Claude Code hooks: {settings_path} is not valid JSON, skipping")
+                    return
+            else:
+                settings_data = {}
+            hooks = settings_data.setdefault("hooks", {})
+
+            # PreToolUse: intercept search tools (Grep/Glob/Bash)
+            pre_entries = hooks.setdefault("PreToolUse", [])
+            if not any(entry.get("matcher") == "Grep|Glob|Bash" for entry in pre_entries):
+                pre_entries.append({
+                    "matcher": "Grep|Glob|Bash",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": str(hook_script),
+                            "timeout": 10,
+                        }
+                    ],
+                })
+
+            # PostToolUse: detect index staleness after git mutations
+            post_entries = hooks.setdefault("PostToolUse", [])
+            if not any(entry.get("matcher") == "Bash" for entry in post_entries):
+                post_entries.append({
+                    "matcher": "Bash",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": str(hook_script),
+                            "timeout": 10,
+                        }
+                    ],
+                })
+
+            _write_json(settings_path, settings_data)
+            result["configured"].append("Claude Code (hooks)")
+        except Exception as e:
+            result["errors"].append(f"Claude Code hooks: {e}")
 
 
 def _setup_opencode(result: dict, bin_path: str) -> None:
-    # Windows: OpenCode may use APPDATA or user home
-    if sys.platform == "win32":
-        appdata = os.environ.get("APPDATA")
-        if appdata:
-            opencode_dir = Path(appdata) / "opencode"
-        else:
-            opencode_dir = Path.home() / ".config" / "opencode"
+    if sys.platform == "win32" and os.environ.get("APPDATA"):
+        opencode_dir = Path(os.environ["APPDATA"]) / "opencode"
     else:
         opencode_dir = Path.home() / ".config" / "opencode"
-    if not _dir_exists(opencode_dir):
+    if not opencode_dir.is_dir():
         result["skipped"].append("OpenCode (not installed)")
         return
     config_path = opencode_dir / "opencode.json"
@@ -654,6 +737,8 @@ def _extract_hook_script(dest_dir: Path, bin_path: str) -> Path | None:
 
     Returns the extracted script path, or None if source not found.
     """
+    if not bin_path:
+        return None
     src = _HOOK_BUNDLE_DIR / _HOOK_TEMPLATE
     if not src.is_file():
         # Also try from PyInstaller _MEIPASS bundle
@@ -677,7 +762,7 @@ def _extract_hook_script(dest_dir: Path, bin_path: str) -> Path | None:
 def _setup_codebuddy(result: dict, bin_path: str) -> None:
     """Configure CodeBuddy user-level MCP + Hooks."""
     codebuddy_dir = Path.home() / ".codebuddy"
-    if not _dir_exists(codebuddy_dir):
+    if not codebuddy_dir.is_dir():
         result["skipped"].append("CodeBuddy (not installed)")
         return
 
@@ -706,11 +791,18 @@ def _setup_codebuddy(result: dict, bin_path: str) -> None:
     if hook_script.is_file():
         try:
             settings_path = codebuddy_dir / "settings.json"
-            settings = _read_json(settings_path) or {}
+            # Safe read: if file exists but is invalid JSON, don't overwrite
+            if settings_path.is_file():
+                settings = _read_json(settings_path)
+                if settings is None:
+                    result["errors"].append(f"CodeBuddy hooks: {settings_path} is not valid JSON, skipping")
+                    return
+            else:
+                settings = {}
             hooks = settings.setdefault("hooks", {})
             # PreToolUse: intercept Grep/Glob/Bash searches
             pre_entries = hooks.setdefault("PreToolUse", [])
-            if not any(e.get("matcher") == "Grep|Glob|Bash" for e in pre_entries):
+            if not any(entry.get("matcher") == "Grep|Glob|Bash" for entry in pre_entries):
                 pre_entries.append({
                     "matcher": "Grep|Glob|Bash",
                     "hooks": [
@@ -723,7 +815,7 @@ def _setup_codebuddy(result: dict, bin_path: str) -> None:
                 })
             # PostToolUse: detect index staleness after git mutations
             post_entries = hooks.setdefault("PostToolUse", [])
-            if not any(e.get("matcher") == "Bash" for e in post_entries):
+            if not any(entry.get("matcher") == "Bash" for entry in post_entries):
                 post_entries.append({
                     "matcher": "Bash",
                     "hooks": [
@@ -742,7 +834,7 @@ def _setup_codebuddy(result: dict, bin_path: str) -> None:
 
 def _setup_codex(result: dict, bin_path: str) -> None:
     codex_dir = Path.home() / ".codex"
-    if not _dir_exists(codex_dir):
+    if not codex_dir.is_dir():
         result["skipped"].append("Codex (not installed)")
         return
     config_path = codex_dir / "config.toml"
@@ -755,9 +847,10 @@ def _setup_codex(result: dict, bin_path: str) -> None:
         if "[mcp_servers.pygitnexus]" in existing:
             result["configured"].append("Codex (already configured)")
             return
+        safe_bin = bin_path.replace("\\", "\\\\").replace('"', '\\"')
         section = (
             f'[mcp_servers.pygitnexus]\n'
-            f'command = "{bin_path}"\n'
+            f'command = "{safe_bin}"\n'
             f'args = ["mcp"]\n'
         )
         content = f"{existing.strip()}\n\n{section}" if existing.strip() else section
@@ -775,7 +868,7 @@ def setup_cmd(ctx, project: bool) -> None:
     """Setup: configure MCP for AI editors, manage MCP/Hooks/Skills.
 
     Without subcommand: auto-detect and configure MCP for Cursor / Claude Code / CodeBuddy / OpenCode / Codex.
-    With --project: also write <cwd>/.codebuddy/settings.json for project-level CodeBuddy.
+    With --project: also write <cwd>/.claude/settings.json and <cwd>/.codebuddy/settings.json for project-level MCP.
     Subcommands: mcp, hook, skill — fine-grained management.
     """
     if ctx.invoked_subcommand is None:
@@ -816,8 +909,18 @@ def setup_auto(project: bool) -> None:
     _setup_opencode(result, bin_path)
     _setup_codex(result, bin_path)
 
-    # Project-level: write <cwd>/.codebuddy/settings.json for CodeBuddy
+    # Project-level: write <cwd>/.claude/settings.json and <cwd>/.codebuddy/settings.json
     if project:
+        # Claude Code project-level MCP
+        project_cc = Path(".claude") / "settings.json"
+        try:
+            ok = _merge_jsonc_like(project_cc, ["mcpServers", "pygitnexus"], _get_mcp_entry(bin_path))
+            if ok:
+                result["configured"].append(f"Claude Code (project: {project_cc})")
+        except Exception as e:
+            result["errors"].append(f"Claude Code (project): {e}")
+
+        # CodeBuddy project-level MCP
         project_cb = Path(".codebuddy") / "mcp.json"
         try:
             ok = _merge_jsonc_like(project_cb, ["mcpServers", "pygitnexus"], _get_mcp_entry(bin_path))
@@ -845,11 +948,10 @@ def setup_auto(project: bool) -> None:
 
     click.echo("")
     click.echo("  Summary:")
-    mcp_editors = [c for c in result["configured"] if "skills" not in c]
-    click.echo(f"    MCP configured for: {', '.join(mcp_editors) or 'none'}")
+    click.echo(f"    Configured: {', '.join(result['configured']) or 'none'}")
     click.echo("")
     click.echo("  Next steps:")
-    click.echo("    1. cd into any Java git repo")
+    click.echo("    1. cd into any git repo")
     click.echo("    2. Run: pygitnexus analyze")
     click.echo("    3. Open the repo in your editor — MCP is ready!")
     click.echo("")
@@ -859,3 +961,5 @@ def setup_auto(project: bool) -> None:
 setup_cmd.add_command(mcp_cmd)
 setup_cmd.add_command(hook_cmd)
 setup_cmd.add_command(skill_cmd)
+# test
+# test
