@@ -83,6 +83,9 @@ run_capture() {
     echo ""
 }
 
+# Save absolute path to project root
+PROJECT_ROOT="$(pwd)"
+
 # 0. Sanity: --version
 run_cmd "[0/12] Sanity: binary --version" "$BINARY" --version
 
@@ -92,19 +95,17 @@ run_cmd "[1/12] Testing: analyze" "$BINARY" analyze "$TEST_DIR"
 # 2. list
 run_cmd "[2/12] Testing: list" "$BINARY" list
 
-# 3. query
+# 3-5. query, cypher, context — must run in test dir to find the DB
+cd "$PROJECT_ROOT/$TEST_DIR" 2>/dev/null
 run_cmd "[3/12] Testing: query" "$BINARY" query "User"
-
-# 4. cypher
 run_cmd "[4/12] Testing: cypher" "$BINARY" cypher "MATCH (n) RETURN count(n)"
-
-# 5. context
 run_cmd "[5/12] Testing: context" "$BINARY" context "main"
+cd "$PROJECT_ROOT" 2>/dev/null
 
 # 6. status
-cd "$TEST_DIR" 2>/dev/null
+cd "$PROJECT_ROOT/$TEST_DIR" 2>/dev/null
 run_cmd "[6/12] Testing: status" "$BINARY" status
-cd .. 2>/dev/null
+cd "$PROJECT_ROOT" 2>/dev/null
 
 # 7. clean
 run_cmd "[7/12] Testing: clean" "$BINARY" clean --force
