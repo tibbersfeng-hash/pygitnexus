@@ -114,7 +114,7 @@ run_cmd "[7/12] Testing: clean" "$BINARY" clean --force
 # 8. install --file
 INST_DIR="$PWD/_test_install"
 mkdir -p "$INST_DIR"
-run_capture "[8/12] Testing: install --file" "$BINARY" install --file "$BINARY" --path "$INST_DIR" --force
+run_capture "[8/12] Testing: install --file" "$BINARY" install --file "$BINARY" --path "$INST_DIR"
 if [ -f "$INST_DIR/pygitnexus${EXT}" ]; then
     VER_OUT=$("$INST_DIR/pygitnexus${EXT}" --version 2>/dev/null)
     echo "  Checkpoint: installed --version = $VER_OUT"
@@ -133,7 +133,7 @@ mkdir -p "$INST_DIR2"
 cp "$BINARY" "$INST_DIR2/pygitnexus${EXT}"
 SELF_DIR="$PWD/_test_self"
 mkdir -p "$SELF_DIR"
-run_capture "[9/12] Testing: install self" "$INST_DIR2/pygitnexus${EXT}" install --path "$SELF_DIR" --force
+run_capture "[9/12] Testing: install self" "$INST_DIR2/pygitnexus${EXT}" install --path "$SELF_DIR"
 if [ -f "$SELF_DIR/pygitnexus${EXT}" ]; then
     VER_OUT=$("$SELF_DIR/pygitnexus${EXT}" --version 2>/dev/null)
     VM="${VER_OUT%%.*}"
@@ -152,7 +152,7 @@ echo ""
 # 10. install --version latest
 VER_DIR="$PWD/_test_ver"
 mkdir -p "$VER_DIR"
-run_capture "[10/12] Testing: install --version latest" "$BINARY" install --version latest --path "$VER_DIR" --force
+run_capture "[10/12] Testing: install --version latest" "$BINARY" install --version latest --path "$VER_DIR"
 if [ -f "$VER_DIR/pygitnexus${EXT}" ]; then
     VER_OUT=$("$VER_DIR/pygitnexus${EXT}" --version 2>/dev/null)
     VM="${VER_OUT%%.*}"
