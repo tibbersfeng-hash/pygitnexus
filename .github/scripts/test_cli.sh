@@ -2,9 +2,12 @@
 # Cross-platform CLI smoke test for PyGitNexus CI
 # Called from: .github/workflows/build.yml
 # Usage: test_cli.sh [binary_path] [tag_version]
-# All commands run with error suppression — this is a smoke test, not strict validation.
 
 set +e
+
+# Failure tracking
+FAILURES=0
+TOTAL=0
 
 # Accept binary path as first argument (defaults to dist/pygitnexus)
 BINARY="${1:-dist/pygitnexus}"
@@ -37,10 +40,11 @@ echo "Binary exists: $(test -f "$BINARY" && echo yes || echo no)"
 echo "Test fixtures: $(test -d "$TEST_DIR" && echo yes || echo no)"
 echo ""
 
-# Helper: run command, capture exit code, print output
+# Helper: run command, capture exit code, print output, track failures
 run_cmd() {
     local label="$1"
     shift
+    TOTAL=$((TOTAL + 1))
     echo "----------------------------------------"
     echo "$label"
     echo "----------------------------------------"
@@ -48,7 +52,12 @@ run_cmd() {
     rc=$?
     cat /tmp/_pgn_out.txt
     echo ""
-    echo "  (exit code: $rc)"
+    if [ "$rc" -eq 0 ]; then
+        echo "  [PASS] $label (exit code: $rc)"
+    else
+        echo "  [FAIL] $label (exit code: $rc)"
+        FAILURES=$((FAILURES + 1))
+    fi
     echo ""
 }
 
@@ -56,6 +65,7 @@ run_cmd() {
 run_capture() {
     local label="$1"
     shift
+    TOTAL=$((TOTAL + 1))
     echo "----------------------------------------"
     echo "$label"
     echo "----------------------------------------"
@@ -63,6 +73,13 @@ run_capture() {
     CAPTURE_RC=$?
     CAPTURE_OUT=$(cat /tmp/_pgn_out.txt)
     echo "$CAPTURE_OUT"
+    echo ""
+    if [ "$CAPTURE_RC" -eq 0 ]; then
+        echo "  [PASS] $label (exit code: $CAPTURE_RC)"
+    else
+        echo "  [FAIL] $label (exit code: $CAPTURE_RC)"
+        FAILURES=$((FAILURES + 1))
+    fi
     echo ""
 }
 
@@ -150,6 +167,7 @@ rm -rf "$VER_DIR"
 echo ""
 
 # 11. web (starts HTTP server, runs briefly then killed)
+TOTAL=$((TOTAL + 1))
 echo "----------------------------------------"
 echo "[11/12] Testing: web"
 echo "----------------------------------------"
@@ -160,15 +178,20 @@ kill $WEB_PID 2>/dev/null
 WEB_OUT=$(cat /tmp/_pgn_web.txt)
 echo "$WEB_OUT"
 if echo "$WEB_OUT" | grep -qi "dashboard\|uvicorn\|18765\|starting"; then
-    echo "  Checkpoint: web server started output detected"
-    echo "  PASS CHECKPOINT: web command started"
+    echo "  [PASS] web command started"
 else
-    echo "  WARN: web command output unexpected"
+    echo "  [FAIL] web command output unexpected"
+    FAILURES=$((FAILURES + 1))
 fi
 echo ""
 
 echo "========================================"
-echo " All 12 CLI commands smoke-tested"
-echo "========================================"
-
-exit 0
+if [ "$FAILURES" -eq 0 ]; then
+    echo " All $TOTAL CLI commands passed"
+    echo "========================================"
+    exit 0
+else
+    echo " $FAILURES/$TOTAL commands FAILED"
+    echo "========================================"
+    exit 1
+fi

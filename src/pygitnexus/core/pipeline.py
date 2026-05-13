@@ -21,6 +21,19 @@ from ..graph.store import GraphStore
 from ..storage.repo_manager import register_repo, RepoInfo
 
 
+def _safe_print(text: str) -> None:
+    """Print with ASCII-safe fallback to avoid Windows console encoding errors.
+
+    Windows console defaults to cp1252 encoding, which fails on non-ASCII
+    characters. This function ensures output is always encodable.
+    """
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        # Fallback: replace non-ASCII chars before printing
+        print(text.encode("ascii", errors="replace").decode("ascii"))
+
+
 def _resolve_html_endpoint_calls(parsed_files: list) -> list[tuple]:
     """Extract HTTP endpoint calls from HTML template files.
 
@@ -241,7 +254,9 @@ def _write_to_graph_batched(
     _t0 = time.monotonic()
     def _step(msg: str) -> None:
         elapsed = time.monotonic() - _t0
-        print(f"  [graph] {elapsed:.1f}s: {msg}")
+        # Use ASCII-safe encoding fallback for Windows console (cp1252)
+        safe_msg = msg.encode("ascii", errors="replace").decode("ascii")
+        _safe_print(f"  [graph] {elapsed:.1f}s: {safe_msg}")
 
     with BatchWriter(store) as bw:
         # 1. Write folders
@@ -1222,13 +1237,13 @@ class BatchWriter:
     def __exit__(self, *args) -> None:
         # Print final summary
         elapsed = time.monotonic() - self._t0
-        print(f"  [graph] {self._done} batches in {elapsed:.1f}s")
+        _safe_print(f"  [graph] {self._done} batches in {elapsed:.1f}s")
 
     def _heartbeat(self) -> None:
         """Print heartbeat if 30+ seconds have passed since last one."""
         elapsed = time.monotonic() - self._t0
         if elapsed - self._last_heartbeat >= self.HEARTBEAT_INTERVAL:
-            print(f"  [graph] still writing... {self._done} batches done ({elapsed:.0f}s)")
+            _safe_print(f"  [graph] still writing... {self._done} batches done ({elapsed:.0f}s)")
             self._last_heartbeat = elapsed
 
     def _advance(self) -> None:

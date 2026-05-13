@@ -63,6 +63,8 @@ jobs:
 
       - name: Test onefile binary
         shell: bash
+        env:
+          PYTHONUTF8: "1"
         run: bash .github/scripts/test_cli.sh dist/pygitnexus
 
       - name: Prepare artifacts
