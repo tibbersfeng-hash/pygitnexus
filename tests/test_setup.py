@@ -14,12 +14,10 @@ import json
 import os
 import shutil
 import sys
-import tempfile
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
-from click.testing import CliRunner
 
 from pygitnexus.cli.setup import (
     setup_cmd,
@@ -36,7 +34,6 @@ from pygitnexus.cli.setup import (
     _ensure_config,
     _save_config,
     _get_mcp_entry,
-    _get_opencode_mcp_entry,
     _sample_hooks,
     _read_skill_description,
 )
@@ -51,20 +48,6 @@ def isolated_config(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("pygitnexus.cli.setup.USER_CONFIG", tmp_path / "config.json")
     monkeypatch.setattr("pygitnexus.cli.setup.SKILLS_DIR", tmp_path / "skills")
     return tmp_path
-
-
-@pytest.fixture()
-def runner():
-    return CliRunner()
-
-
-@pytest.fixture()
-def fake_bin(tmp_path: Path):
-    """Create a fake pygitnexus binary."""
-    bin_path = tmp_path / "pygitnexus"
-    bin_path.write_text("#!/bin/sh\necho 0.1.0\n", encoding="utf-8")
-    bin_path.chmod(0o755)
-    return str(bin_path)
 
 
 # ─── Config read/write ──────────────────────────────────────────────
@@ -146,10 +129,6 @@ class TestMcpEntry:
         entry = _get_mcp_entry("/usr/bin/pygitnexus")
         assert entry == {"command": "/usr/bin/pygitnexus", "args": ["mcp"]}
 
-    def test_get_opencode_mcp_entry(self):
-        entry = _get_opencode_mcp_entry("/usr/bin/pygitnexus")
-        assert entry == {"type": "local", "command": ["/usr/bin/pygitnexus", "mcp"]}
-
 
 # ─── Setup auto: delete then verify re-add ──────────────────────────
 
@@ -159,52 +138,6 @@ class TestSetupAutoDeleteThenAdd:
     All tests use isolated_filesystem to avoid modifying real user config files.
     Editor directories are simulated via Path.is_dir mocking.
     """
-
-    def test_cursor_delete_then_setup_adds(self, runner, isolated_config, fake_bin):
-        """Delete pygitnexus from Cursor, run setup, verify it's back."""
-        cursor_dir = Path.home() / ".cursor"
-        mcp_path = cursor_dir / "mcp.json"
-        if not cursor_dir.is_dir():
-            pytest.skip("Cursor not installed")
-
-        # Backup existing config
-        backup = None
-        if mcp_path.exists():
-            backup = mcp_path.read_text(encoding="utf-8")
-
-        try:
-            # Step 1: Write pre-existing config with pygitnexus
-            existing = {"mcpServers": {"pygitnexus": {"command": "/old/path", "args": ["mcp"]}}}
-            _write_json(mcp_path, existing)
-
-            # Step 2: Delete existing config
-            data = _read_json(mcp_path) or {}
-            servers = data.get("mcpServers", {})
-            if "pygitnexus" in servers:
-                del servers["pygitnexus"]
-                _write_json(mcp_path, data)
-
-            # Step 3: Verify it's gone
-            data = _read_json(mcp_path)
-            assert "pygitnexus" not in (data or {}).get("mcpServers", {})
-
-            # Step 4: Run setup
-            with patch("pygitnexus.cli.setup._resolve_binary_path", return_value=fake_bin):
-                result = runner.invoke(setup_cmd, [])
-            assert result.exit_code == 0
-
-            # Step 5: Verify it's back
-            data = _read_json(mcp_path)
-            assert "pygitnexus" in (data or {}).get("mcpServers", {})
-            entry = (data or {}).get("mcpServers", {}).get("pygitnexus", {})
-            assert entry.get("command") == fake_bin
-            assert entry.get("args") == ["mcp"]
-        finally:
-            if backup is not None:
-                mcp_path.write_text(backup, encoding="utf-8")
-            elif mcp_path.exists():
-                # Remove the test-created file
-                mcp_path.unlink()
 
     def test_claude_code_delete_then_setup_adds(self, runner, isolated_config, fake_bin):
         """Delete pygitnexus from Claude Code, run setup, verify it's back.
@@ -280,36 +213,6 @@ class TestSetupAutoDeleteThenAdd:
                 data = json.loads(project_cb.read_text(encoding="utf-8"))
                 assert "pygitnexus" in data.get("mcpServers", {})
 
-    def test_auto_preserves_other_mcp_servers(self, runner, isolated_config, fake_bin):
-        """Should merge with existing MCP config, not overwrite."""
-        cursor_dir = Path.home() / ".cursor"
-        mcp_path = cursor_dir / "mcp.json"
-        if not cursor_dir.is_dir():
-            pytest.skip("Cursor not installed")
-
-        # Backup existing config
-        backup = None
-        if mcp_path.exists():
-            backup = mcp_path.read_text(encoding="utf-8")
-
-        try:
-            # Pre-existing config with other servers
-            existing = {"mcpServers": {"other-server": {"command": "other", "args": []}}}
-            _write_json(mcp_path, existing)
-
-            with patch("pygitnexus.cli.setup._resolve_binary_path", return_value=fake_bin):
-                result = runner.invoke(setup_cmd, [])
-            assert result.exit_code == 0
-
-            data = _read_json(mcp_path)
-            assert "other-server" in data.get("mcpServers", {})
-            assert "pygitnexus" in data.get("mcpServers", {})
-        finally:
-            if backup is not None:
-                mcp_path.write_text(backup, encoding="utf-8")
-            elif mcp_path.exists():
-                mcp_path.unlink()
-
 
 # ─── CodeBuddy MCP uses mcp.json ────────────────────────────────────
 
@@ -327,8 +230,8 @@ class TestCodeBuddyMcpJson:
         if mcp_path.exists():
             backup = mcp_path.read_text(encoding="utf-8")
 
-        def _is_dir_mock(self):
-            return str(self).startswith(str(codebuddy_dir))
+        def _is_dir_mock(path_obj):
+            return str(path_obj).startswith(str(codebuddy_dir))
 
         try:
             # Delete existing config
@@ -394,8 +297,8 @@ class TestCodeBuddyHooks:
     def _only_codebuddy(self, codebuddy_dir):
         """Path.is_dir mock that only recognizes CodeBuddy directory."""
         cb = str(codebuddy_dir)
-        def _mock(self):
-            return str(self).startswith(cb)
+        def _mock(path_obj):
+            return str(path_obj).startswith(cb)
         return _mock
 
     def test_setup_auto_writes_hooks(self, runner, isolated_config, fake_bin):
@@ -424,7 +327,7 @@ class TestCodeBuddyHooks:
                 del existing["hooks"]
                 _write_json(settings_path, existing)
 
-            # Run setup auto — only CodeBuddy dir is recognized, avoiding writes to Cursor/Claude
+            # Run setup auto — only CodeBuddy dir is recognized, avoiding writes to Claude
             with patch("pygitnexus.cli.setup._resolve_binary_path", return_value=fake_bin), \
                  patch.object(Path, "is_dir", self._only_codebuddy(codebuddy_dir)):
                 result = runner.invoke(setup_cmd, [])
@@ -774,12 +677,70 @@ class TestSkillRemove:
         result = runner.invoke(skill_cmd, ["remove", "test-skill"])
         assert result.exit_code == 0
         assert "removed" in result.output
-        assert not (SKILLS_DIR / "test-skill").exists()
+
+        # Use module attribute (SKILLS_DIR is patched by isolated_config)
+        import pygitnexus.cli.setup as setup_module
+        assert not (setup_module.SKILLS_DIR / "test-skill").exists()
 
     def test_remove_nonexistent(self, runner, isolated_config):
         result = runner.invoke(skill_cmd, ["remove", "nonexistent"])
         assert result.exit_code == 0
         assert "not found" in result.output
+
+
+class TestSkillShow:
+    """Test `pygitnexus setup skill show`."""
+
+    def test_show_existing(self, runner, isolated_config):
+        runner.invoke(skill_cmd, ["init", "show-skill", "-d", "Show me"])
+        result = runner.invoke(skill_cmd, ["show", "show-skill"])
+        assert result.exit_code == 0
+        assert "show-skill" in result.output
+        assert "Show me" in result.output
+
+    def test_show_nonexistent(self, runner, isolated_config):
+        result = runner.invoke(skill_cmd, ["show", "no-such-skill"])
+        assert result.exit_code == 0
+        assert "not found" in result.output
+
+    def test_show_rejects_path_traversal(self, runner, isolated_config):
+        """Skill name with .. should be rejected."""
+        result = runner.invoke(skill_cmd, ["show", "../etc"])
+        assert result.exit_code == 0
+        assert "Error" in result.output
+
+    def test_show_rejects_slash(self, runner, isolated_config):
+        """Skill name with / should be rejected."""
+        result = runner.invoke(skill_cmd, ["show", "foo/bar"])
+        assert result.exit_code == 0
+        assert "Error" in result.output
+
+
+class TestSkillSecurity:
+    """Test path traversal protection for skill commands."""
+
+    def test_init_rejects_slash(self, runner, isolated_config):
+        result = runner.invoke(skill_cmd, ["init", "bad/name", "-d", "Test"])
+        assert result.exit_code == 0
+        assert "Error" in result.output
+
+    def test_remove_rejects_dotdot(self, runner, isolated_config):
+        result = runner.invoke(skill_cmd, ["remove", "../skills/foo"])
+        assert result.exit_code == 0
+        assert "Error" in result.output
+
+    def test_init_force_overwrites(self, runner, isolated_config):
+        """--force should overwrite existing SKILL.md."""
+        r1 = runner.invoke(skill_cmd, ["init", "force-skill", "-d", "Original"])
+        assert r1.exit_code == 0
+
+        r2 = runner.invoke(skill_cmd, ["init", "force-skill", "-d", "Original"])
+        assert r2.exit_code == 0
+        assert "already exists" in r2.output
+
+        r3 = runner.invoke(skill_cmd, ["init", "force-skill", "-d", "Updated", "--force"])
+        assert r3.exit_code == 0
+        assert "created" in r3.output
 
 
 # ─── Skill description parsing ──────────────────────────────────────

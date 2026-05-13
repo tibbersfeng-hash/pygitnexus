@@ -29,6 +29,7 @@ _parser_lock = threading.Lock()
 
 # Query pairs: (query, cursor_factory) - cursor is created per-file
 _queries: dict[str, ts.Query] = {}
+_queries_lock = threading.Lock()
 
 
 def _get_lang() -> ts.Language:
@@ -48,7 +49,9 @@ def _get_parser() -> ts.Parser:
 def _get_query(name: str, source: str) -> ts.Query:
     """Get or create a cached tree-sitter query."""
     if name not in _queries:
-        _queries[name] = ts.Query(_get_lang(), source)
+        with _queries_lock:
+            if name not in _queries:
+                _queries[name] = ts.Query(_get_lang(), source)
     return _queries[name]
 
 
@@ -91,6 +94,8 @@ _FUNCTIONAL_METHOD_TYPE_PARAM: dict[str, int] = {
 
 
 def _strip_generics(type_str: str) -> str:
+    if not type_str:
+        return ""
     if "<" in type_str:
         return type_str.split("<")[0].strip()
     return type_str
@@ -107,14 +112,12 @@ def _trace_builder_chain(node: ts.Node, source: bytes, type_map: dict[str, str])
 
     Returns the inferred builder target type, or None.
     """
-    builder_methods = {"builder", "newBuilder", "newBuilderInstance",
-                       "newSelectorBuilder", "newRuleBuilder", "newConditions",
-                       "newBindingData", "newDivideRuleHandle", "newUpstreamsBuilder",
-                       "newCondition", "divideUpstreams"}
-
     # Walk DOWN the chain of nested method_invocations to find the root
     current = node
-    while True:
+    max_depth = 50  # Prevent infinite loop on pathological ASTs
+    depth = 0
+    while depth < max_depth:
+        depth += 1
         # Find the receiver: first child that is method_invocation, field_access, or identifier
         receiver = None
         method_name = None
@@ -202,14 +205,14 @@ def _extract_method_return_type(method_node: ts.Node, source: bytes) -> str:
                     return _node_text(gc, source)
             break
         elif child.type == "array_type":
-            # Array type: extract element type + brackets (e.g., String[], int[][])
+            # Array type: extract element type + dimensions (e.g., String[], int[][])
             parts: list[str] = []
             for ac in child.children:
                 if ac.type == "type_identifier":
                     parts.append(_node_text(ac, source))
-                elif ac.type == "bracketed_type":
-                    # e.g., String[][] has nested brackets
-                    parts.append("[]")
+                elif ac.type == "dimensions":
+                    # e.g., String[][] has dimensions node
+                    parts.append(_node_text(ac, source))
                 elif ac.type == "_type" or ac.type == "integral_type":
                     parts.append(_node_text(ac, source))
             return "".join(parts) if parts else "void"
@@ -249,11 +252,13 @@ def _extract_modifiers(node: ts.Node, source: bytes) -> str:
     return text
 
 
+# Default recursion limit for tree-sitter AST traversal.
+# Set once at module load time to avoid repeated side effects.
+sys.setrecursionlimit(10000)
+
+
 def parse(file_path: str, content: bytes) -> ParsedFile:
     """Parse a single Java file and extract all symbols."""
-    # Tree-sitter query cursor recursively walks the AST — raise limit to
-    # accommodate deeply nested files (e.g. XmlToJson with 100+ if/else levels).
-    sys.setrecursionlimit(10000)
     lang = _get_lang()
     with _parser_lock:
         parser = _get_parser()
@@ -263,7 +268,7 @@ def parse(file_path: str, content: bytes) -> ParsedFile:
     package = _extract_package(content, lang, tree.root_node)
 
     # Pre-compute class and method byte ranges for fast lookups
-    class_byte_map = _build_class_byte_map(tree.root_node, content)
+    class_byte_map = _build_class_byte_map(tree.root_node, content, package)
     method_byte_map = _build_method_byte_map(tree.root_node, content)
 
     # --- Classes ---
@@ -280,7 +285,15 @@ def parse(file_path: str, content: bytes) -> ParsedFile:
             continue
         class_node = cd["class"][0]
         class_name = _node_text(name_nodes[0], content)
-        fqn = f"{package}.{class_name}" if package else class_name
+        # Use byte map FQN for proper nested class handling
+        fqn = class_name
+        for start, end, byte_fqn in class_byte_map:
+            if class_node.start_byte == start and class_node.end_byte == end:
+                fqn = byte_fqn
+                break
+        else:
+            # Fallback: simple package + name
+            fqn = f"{package}.{class_name}" if package else class_name
 
         modifiers_text = _extract_modifiers(class_node, content)
 
@@ -321,16 +334,26 @@ def parse(file_path: str, content: bytes) -> ParsedFile:
             continue
         iface_node = cd["interface"][0]
         iface_name = _node_text(name_nodes[0], content)
-        fqn = f"{package}.{iface_name}" if package else iface_name
+        # Use byte map FQN for proper nested interface handling
+        fqn = iface_name
+        for start, end, byte_fqn in class_byte_map:
+            if iface_node.start_byte == start and iface_node.end_byte == end:
+                fqn = byte_fqn
+                break
+        else:
+            fqn = f"{package}.{iface_name}" if package else iface_name
 
         modifiers_text = _extract_modifiers(iface_node, content)
 
         # Extract interface extends (Java: interface Foo extends Bar, Baz)
-        # The extends clause appears as type_list child of interface_declaration
+        # The extends clause appears as extends_interfaces > type_list child of interface_declaration
         iface_extends: list[str] = []
         for iface_child in iface_node.children:
-            if iface_child.type == "type_list":
-                iface_extends = _extract_implements(iface_child, content)
+            if iface_child.type == "extends_interfaces":
+                for ext_sub in iface_child.children:
+                    if ext_sub.type == "type_list":
+                        iface_extends = _extract_implements(ext_sub, content)
+                        break
                 break
 
         result.classes.append(ClassDef(
@@ -547,6 +570,9 @@ def _extract_calls_per_method(
     for field in result.fields:
         field_type_map[field.name] = field.type_name
 
+    # Build reverse index once, reuse across all methods
+    method_to_classes = _build_method_to_classes(result.methods)
+
     cursor = ts.QueryCursor(method_q)
     for _, captures in cursor.matches(root):
         cd = _captures_to_dict(method_q, captures)
@@ -648,7 +674,7 @@ def _extract_calls_per_method(
                 type_map[lp_name] = lp_type
 
         # Infer lambda parameter types (must be after type_map build, before call extraction)
-        _infer_lambda_param_types(body_node, source, type_map, result.methods, lang)
+        _infer_lambda_param_types(body_node, source, type_map, method_to_classes)
 
         # Extract calls within method body
         call_cursor = ts.QueryCursor(call_q)
@@ -1194,10 +1220,9 @@ def _infer_lambda_param_types(
     body_node: ts.Node,
     source: bytes,
     type_map: dict[str, str],
-    methods: list,
-    lang: ts.Language,
+    method_to_classes: dict[str, list[str]],
 ) -> None:
-    """Main entry point: infer lambda parameter types and add to type_map.
+    """Main entry point: infer Lambda parameter types and add to type_map.
 
     Must be called after type_map is built from fields, params, locals, and
     enhanced for-loop variables, but before call extraction.
@@ -1206,7 +1231,6 @@ def _infer_lambda_param_types(
     1. Receiver chain + generic propagation (primary)
     2. Lambda body method lookup + reverse index (fallback)
     """
-    method_to_classes = _build_method_to_classes(methods)
 
     lambda_q = _get_query("lambda_expr", "(lambda_expression) @lambda")
     cursor = ts.QueryCursor(lambda_q)
@@ -1256,14 +1280,11 @@ def _extract_method_references(
     - Class::staticMethod  →  static method call
     """
     ref_q = _get_query("method_ref", "(method_reference) @ref")
-    root = body_node
-    while root.parent:
-        root = root.parent
 
     cursor = ts.QueryCursor(ref_q)
     seen: set[tuple[int, str]] = set()
 
-    for _, caps in cursor.matches(root):
+    for _, caps in cursor.matches(body_node):
         cd = _captures_to_dict(ref_q, caps)
         ref_nodes = cd.get("ref", [])
         if not ref_nodes:
@@ -1274,14 +1295,25 @@ def _extract_method_references(
         if ref_node.start_byte < body_node.start_byte or ref_node.end_byte > body_node.end_byte:
             continue
 
-        # method_reference children: identifier, '::', identifier
-        # e.g., OSProcess::getUser
-        children = [c for c in ref_node.children if c.type == "identifier"]
+        # method_reference children: identifier or field_access, '::', identifier
+        # e.g., OSProcess::getUser or System.out::println
+        children = [c for c in ref_node.children if c.type in ("identifier", "field_access")]
         if len(children) < 2:
             continue
 
-        receiver_name = _node_text(children[0], source)
-        method_name = _node_text(children[1], source)
+        first_child = children[0]
+        method_name = _node_text(children[1], source) if len(children) > 1 else ""
+        if not method_name:
+            continue
+
+        # Resolve receiver name: for field_access, use the last identifier
+        if first_child.type == "identifier":
+            receiver_name = _node_text(first_child, source)
+        elif first_child.type == "field_access":
+            field_node = first_child.child_by_field_name("field")
+            receiver_name = _node_text(field_node, source) if field_node else _node_text(first_child, source)
+        else:
+            receiver_name = _node_text(first_child, source)
 
         dedup_key = (ref_node.start_byte, method_name)
         if dedup_key in seen:
@@ -1331,14 +1363,11 @@ def _extract_constructor_calls(
         (object_creation_expression
           type: (type_identifier) @obj_type) @obj_call
     """)
-    root = body_node
-    while root.parent:
-        root = root.parent
 
     cursor = ts.QueryCursor(obj_q)
     seen: set[int] = set()
 
-    for _, caps in cursor.matches(root):
+    for _, caps in cursor.matches(body_node):
         cd = _captures_to_dict(obj_q, caps)
         call_nodes = cd.get("obj_call", [])
         type_nodes = cd.get("obj_type", [])
@@ -1395,14 +1424,11 @@ def _extract_explicit_ctor_invocations(
         (explicit_constructor_invocation
           (this) @ctor_kind) @ctor_call
     """)
-    root = body_node
-    while root.parent:
-        root = root.parent
 
     cursor = ts.QueryCursor(ctor_q)
     seen: set[int] = set()
 
-    for _, caps in cursor.matches(root):
+    for _, caps in cursor.matches(body_node):
         cd = _captures_to_dict(ctor_q, caps)
         call_nodes = cd.get("ctor_call", [])
         if not call_nodes:
@@ -1465,10 +1491,11 @@ _enclosing_class_q = _get_query("enclosing_class", """
 _enclosing_method_q = _get_query("enclosing_method", "(method_declaration name: (identifier) @name) @method")
 
 
-def _build_class_byte_map(root: ts.Node, source: bytes) -> list[tuple[int, int, str]]:
+def _build_class_byte_map(root: ts.Node, source: bytes, package: str | None = None) -> list[tuple[int, int, str]]:
     """Pre-compute all class/interface byte ranges for a file.
 
     Returns sorted list of (start_byte, end_byte, qualified_name).
+    For nested classes, builds proper FQN by tracking nesting.
     """
     cursor = ts.QueryCursor(_enclosing_class_q)
     classes: list[tuple[int, int, str]] = []
@@ -1478,8 +1505,20 @@ def _build_class_byte_map(root: ts.Node, source: bytes) -> list[tuple[int, int, 
         name_nodes = cd.get("name", [])
         if cls_nodes and name_nodes:
             cls_node = cls_nodes[0]
-            name = _node_text(name_nodes[0], source)
-            classes.append((cls_node.start_byte, cls_node.end_byte, name))
+            simple_name = _node_text(name_nodes[0], source)
+            # Build FQN: check if enclosing class exists
+            enclosers = []
+            for s, e, n in classes:
+                if cls_node.start_byte >= s and cls_node.end_byte <= e:
+                    enclosers.append(n)
+            if enclosers:
+                # Nested class: parent.child
+                fqn = enclosers[-1] + "." + simple_name
+            elif package:
+                fqn = package + "." + simple_name
+            else:
+                fqn = simple_name
+            classes.append((cls_node.start_byte, cls_node.end_byte, fqn))
     return classes
 
 
@@ -1496,7 +1535,8 @@ def _find_enclosing_class_fast(
     if not enclosers:
         return None
     enclosers.sort(key=lambda x: x[0])
-    return ".".join(name for _, _, name in enclosers)
+    # Return the innermost class name (already has proper FQN from byte map)
+    return enclosers[-1][2]
 
 
 def _build_method_byte_map(root: ts.Node, source: bytes) -> list[tuple[int, int, str]]:
@@ -1528,148 +1568,6 @@ def _find_enclosing_method_fast(
                 owner = _find_enclosing_class_fast(node, source, class_byte_map)
                 best = (span, f"{owner}.{name}" if owner else name)
     return best[1] if best else None
-
-
-def _find_enclosing_class(node: ts.Node, source: bytes, lang: ts.Language) -> str | None:
-    """Find the class or interface that contains the given node by byte range comparison.
-
-    For nested classes, returns the qualified name like "Outer.Inner".
-
-    Deprecated: use _find_enclosing_class_fast with a pre-built class_byte_map.
-    """
-    cursor = ts.QueryCursor(_enclosing_class_q)
-    root = node
-    while root.parent:
-        root = root.parent
-
-    # Collect all enclosing class names by byte range
-    enclosers: list[tuple[int, int, str]] = []
-    for _, captures in cursor.matches(root):
-        cd = _captures_to_dict(_enclosing_class_q, captures)
-        cls_nodes = cd.get("cls", [])
-        name_nodes = cd.get("name", [])
-        if cls_nodes and name_nodes:
-            cls_node = cls_nodes[0]
-            if node.start_byte >= cls_node.start_byte and node.end_byte <= cls_node.end_byte:
-                name = _node_text(name_nodes[0], source)
-                span = cls_node.end_byte - cls_node.start_byte
-                enclosers.append((cls_node.start_byte, span, name))
-
-    if not enclosers:
-        return None
-
-    # Sort by start_byte (outermost first) to get proper nesting order
-    enclosers.sort(key=lambda x: x[0])
-    # Join names with '.' to form qualified name
-    return ".".join(name for _, _, name in enclosers)
-
-
-def _find_enclosing_method(node: ts.Node, source: bytes, lang: ts.Language) -> str | None:
-    """Find the method that contains the given node by byte range comparison."""
-    cursor = ts.QueryCursor(_enclosing_method_q)
-    best: tuple[int, int, str] | None = None
-    root = node
-    while root.parent:
-        root = root.parent
-    for _, captures in cursor.matches(root):
-        cd = _captures_to_dict(_enclosing_method_q, captures)
-        method_nodes = cd.get("method", [])
-        name_nodes = cd.get("name", [])
-        if method_nodes and name_nodes:
-            method_node = method_nodes[0]
-            if node.start_byte >= method_node.start_byte and node.end_byte <= method_node.end_byte:
-                name = _node_text(name_nodes[0], source)
-                span = method_node.end_byte - method_node.start_byte
-                if best is None or span < best[1]:
-                    owner = _find_enclosing_class(method_node, source, lang)
-                    best = (method_node.start_byte, span, f"{owner}.{name}" if owner else name)
-    return best[2] if best else None
-
-
-# Pre-compiled queries for type map building
-_local_var_q: ts.Query | None = None
-_annotation_q: ts.Query | None = None
-
-
-def _build_type_map(root: ts.Node, source: bytes, lang: ts.Language) -> dict[str, str]:
-    """Build a mapping of local variable/field/param names to their types.
-
-    This is used for receiver type resolution in method calls.
-    Collects: local variable declarations, method parameters, constructor parameters, and fields.
-    """
-    type_map: dict[str, str] = {}
-
-    # Local variables
-    local_q = _get_query("local_var", """
-        (local_variable_declaration
-          type: (_) @vtype
-          declarator: (variable_declarator
-            name: (identifier) @vname))
-    """)
-    cursor = ts.QueryCursor(local_q)
-    for _, captures in cursor.matches(root):
-        cd = _captures_to_dict(local_q, captures)
-        type_nodes = cd.get("vtype", [])
-        name_nodes = cd.get("vname", [])
-        if type_nodes and name_nodes:
-            var_name = _node_text(name_nodes[0], source)
-            var_type = _strip_generics(_node_text(type_nodes[0], source))
-            type_map[var_name] = var_type
-
-    # Method parameters
-    method_param_q = _get_query("method_param", """
-        (method_declaration
-          parameters: (formal_parameters
-            (formal_parameter
-              type: (_) @mtype
-              name: (identifier) @mname)))
-    """)
-    cursor = ts.QueryCursor(method_param_q)
-    for _, captures in cursor.matches(root):
-        cd = _captures_to_dict(method_param_q, captures)
-        type_nodes = cd.get("mtype", [])
-        name_nodes = cd.get("mname", [])
-        if type_nodes and name_nodes:
-            param_name = _node_text(name_nodes[0], source)
-            param_type = _strip_generics(_node_text(type_nodes[0], source))
-            type_map[param_name] = param_type
-
-    # Constructor parameters
-    ctor_param_q = _get_query("ctor_param", """
-        (constructor_declaration
-          parameters: (formal_parameters
-            (formal_parameter
-              type: (_) @ctype
-              name: (identifier) @cname)))
-    """)
-    cursor = ts.QueryCursor(ctor_param_q)
-    for _, captures in cursor.matches(root):
-        cd = _captures_to_dict(ctor_param_q, captures)
-        type_nodes = cd.get("ctype", [])
-        name_nodes = cd.get("cname", [])
-        if type_nodes and name_nodes:
-            param_name = _node_text(name_nodes[0], source)
-            param_type = _strip_generics(_node_text(type_nodes[0], source))
-            type_map[param_name] = param_type
-
-    # Fields (for 'this.field' or direct field access)
-    field_q = _get_query("field_in_type_map", """
-        (field_declaration
-          type: (_) @ftype
-          declarator: (variable_declarator
-            name: (identifier) @fname))
-    """)
-    cursor = ts.QueryCursor(field_q)
-    for _, captures in cursor.matches(root):
-        cd = _captures_to_dict(field_q, captures)
-        type_nodes = cd.get("ftype", [])
-        name_nodes = cd.get("fname", [])
-        if type_nodes and name_nodes:
-            field_name = _node_text(name_nodes[0], source)
-            field_type = _strip_generics(_node_text(type_nodes[0], source))
-            type_map[field_name] = field_type
-
-    return type_map
 
 
 def _extract_variables(
@@ -2079,14 +1977,16 @@ def _is_assignment_target(node: ts.Node) -> bool:
     parent = node.parent
     while parent:
         if parent.type == "assignment_expression":
-            # Check if our node is the left-hand side
             left = parent.child_by_field_name("left")
-            if left and left.id == node.id:
+            if left is None:
+                return False
+            # Direct match: our node is the LHS
+            if left.id == node.id:
                 return True
-            # Also check by byte position
-            if parent.children and parent.children[0].start_byte == node.start_byte:
+            # Our node is inside the LHS (e.g., identifier inside field_access)
+            if left.start_byte <= node.start_byte < left.end_byte:
                 return True
-            break
+            return False
         # Stop if we hit a statement boundary
         if parent.type in ("expression_statement", "return_statement", "if_statement",
                           "for_statement", "while_statement", "block"):
