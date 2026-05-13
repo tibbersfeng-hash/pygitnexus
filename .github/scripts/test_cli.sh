@@ -83,8 +83,9 @@ run_capture() {
     echo ""
 }
 
-# Save absolute path to project root
+# Save absolute path to project root and binary
 PROJECT_ROOT="$(pwd)"
+BINARY="$PROJECT_ROOT/$BINARY"
 
 # 0. Sanity: --version
 run_cmd "[0/12] Sanity: binary --version" "$BINARY" --version
