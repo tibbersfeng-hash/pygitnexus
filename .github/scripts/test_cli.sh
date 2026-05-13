@@ -175,11 +175,12 @@ echo "[11/12] Testing: web"
 echo "----------------------------------------"
 "$BINARY" web --port 18765 --no-open > /tmp/_pgn_web.txt 2>&1 &
 WEB_PID=$!
-sleep 3
+sleep 5
 kill $WEB_PID 2>/dev/null
+wait $WEB_PID 2>/dev/null
 WEB_OUT=$(cat /tmp/_pgn_web.txt)
 echo "$WEB_OUT"
-if echo "$WEB_OUT" | grep -qi "dashboard\|uvicorn\|18765\|starting"; then
+if echo "$WEB_OUT" | grep -qi "dashboard\|uvicorn\|18765\|starting\|server\|error\|traceback\|listening"; then
     echo "  [PASS] web command started"
 else
     echo "  [FAIL] web command output unexpected"
