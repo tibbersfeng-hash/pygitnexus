@@ -479,16 +479,6 @@ def create_server() -> FastMCP:
         else:
             lines.append("  (none)")
 
-        # Imports
-        imports = ctx.get("imports", [])
-        lines.append(f"\nImports ({len(imports)}):")
-        if imports:
-            for imp in imports:
-                target = imp.get("target", "")
-                lines.append(f"  > {target}")
-        else:
-            lines.append("  (none)")
-
         return "\n".join(lines)
 
     @mcp.tool()
